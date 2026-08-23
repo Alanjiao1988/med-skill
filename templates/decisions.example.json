@@ -1,0 +1,45 @@
+{
+  "run_id": "COPY-EXACTLY-FROM-candidates-YYYY-MM.json",
+  "brief_generated": true,
+  "brief_path": "out/brief-YYYY-MM.md",
+  "items": {
+    "PMID:40123456": {
+      "verdict": "material",
+      "scores": {
+        "S": 4,
+        "N": 2,
+        "R": 3
+      },
+      "peer_review_status": "peer_reviewed",
+      "evidence_basis": "full_text",
+      "paradigm_status": "EXTENDS_EXISTING_MODEL"
+    },
+    "PPR:PPR1281037": {
+      "verdict": "preprint_watchlist",
+      "scores": {
+        "S": 2,
+        "N": 2,
+        "R": "N/A"
+      },
+      "peer_review_status": "preprint",
+      "evidence_basis": "abstract_only",
+      "paradigm_status": "NEW_HYPOTHESIS"
+    }
+  },
+  "baseline": {
+    "treatment": [
+      {
+        "claim": "示例：正式同行评议证据支持的 baseline claim。",
+        "strength": 4,
+        "sources": [
+          "PMID:40123456"
+        ],
+        "updated": "YYYY-MM-DD"
+      }
+    ],
+    "mechanism": [],
+    "biomarkers": [],
+    "natural_history": [],
+    "guidelines": []
+  }
+}
