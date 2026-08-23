@@ -50,6 +50,7 @@ WINDOW_OVERLAP_DAYS = 15
 MAX_PUBMED_ESEARCH = 10000
 UA = "med-skill-evidence-surveillance/0.3"
 KEY_PREFIX = {"CTGOV": "NCT:", "ISRCTN": "ISRCTN:", "CTIS": "CTIS:"}
+VALID_VERDICTS = {"material", "appendix", "preprint_watchlist", "discarded"}
 
 
 def request_bytes(req, retries=4, timeout=90):
@@ -764,6 +765,43 @@ def validate_no_preprint_baseline(baseline):
                     raise ValueError(f"baseline {section} contains preprint-only source {src}")
 
 
+def validate_decisions(candidates, decisions):
+    item_decisions = decisions.get("items")
+    if not isinstance(item_decisions, dict):
+        raise ValueError("decisions.items must be an object keyed by candidate_id")
+
+    missing = []
+    for rec in iter_candidate_papers(candidates):
+        cid = rec.get("candidate_id") or paper_candidate_id(rec)
+        decision = item_decisions.get(cid)
+        if not isinstance(decision, dict):
+            missing.append(cid)
+            continue
+
+        verdict = decision.get("verdict")
+        if verdict not in VALID_VERDICTS:
+            raise ValueError(f"{cid}: invalid verdict {verdict!r}")
+
+        scores = decision.get("scores")
+        if not isinstance(scores, dict) or "S" not in scores or "N" not in scores or "R" not in scores:
+            raise ValueError(f"{cid}: decisions must include explicit S/N/R (R may be 'N/A')")
+
+        if rec.get("peer_review_status") == "preprint" and verdict == "material":
+            raise ValueError(f"{cid}: a preprint cannot use verdict='material'; use preprint_watchlist/appendix/discarded")
+
+        if verdict == "material":
+            evidence_basis = decision.get("evidence_basis")
+            if evidence_basis not in ("full_text", "abstract_only", "guideline_full_text"):
+                raise ValueError(f"{cid}: material item requires explicit evidence_basis")
+
+    if missing:
+        preview = ", ".join(missing[:10])
+        more = " ..." if len(missing) > 10 else ""
+        raise ValueError(
+            "decisions incomplete; refusing to mark unreviewed candidates as seen: " + preview + more
+        )
+
+
 def commit_phase(args):
     if not args.candidates or not args.decisions:
         sys.exit("--commit-state requires --candidates and --decisions")
@@ -778,9 +816,13 @@ def commit_phase(args):
     if decisions.get("brief_generated") is not True:
         sys.exit("decisions.brief_generated must be true")
 
-    baseline = decisions.get("baseline")
-    if baseline is not None:
-        validate_no_preprint_baseline(baseline)
+    try:
+        validate_decisions(candidates, decisions)
+        baseline = decisions.get("baseline")
+        if baseline is not None:
+            validate_no_preprint_baseline(baseline)
+    except ValueError as ex:
+        sys.exit("decision validation failed: " + str(ex))
 
     state = load_state() or {
         "schema_version": 2,
@@ -791,12 +833,12 @@ def commit_phase(args):
     }
     state["schema_version"] = 2
     seen = state.setdefault("seen", {})
-    item_decisions = decisions.get("items", {})
+    item_decisions = decisions["items"]
     today = date.today()
 
     for rec in iter_candidate_papers(candidates):
         cid = rec.get("candidate_id") or paper_candidate_id(rec)
-        decision = item_decisions.get(cid, {})
+        decision = item_decisions[cid]
 
         if rec.get("peer_review_status") == "preprint":
             key = "PPR:" + rec.get("epmc_id", "")
@@ -809,10 +851,9 @@ def commit_phase(args):
         entry["title_norm"] = norm_title(rec.get("title", ""))
         entry["peer_review_status"] = rec.get("peer_review_status", "peer_reviewed")
         entry["retrieval_depth"] = decision.get("evidence_basis", rec.get("retrieval_depth", "abstract"))
-        if decision:
-            entry["verdict"] = decision.get("verdict")
-            entry["scores"] = decision.get("scores")
-            entry["paradigm_status"] = decision.get("paradigm_status")
+        entry["verdict"] = decision.get("verdict")
+        entry["scores"] = decision.get("scores")
+        entry["paradigm_status"] = decision.get("paradigm_status")
 
         if rec.get("peer_review_status") == "preprint":
             entry["is_preprint"] = True
