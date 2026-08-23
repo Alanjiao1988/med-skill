@@ -27,7 +27,7 @@ disclaimer: 研究与证据监测用途，不构成医疗建议，不替代临�
 ## 核心工作流
 
 1. **确定窗口**：`start = state.window_end_edat - 15d`，`end = today`。故意重叠 15 天，覆盖 PubMed 入库延迟。
-2. **检索六条 track**：机制 / 治疗 / 生物标志物 / 自然史与安全性 / 指南共识 / 临床试验。检索式**必须**逐字使用 `references/search-queries.md` 中的固化查询，不得即兴改写；改写会破坏月度可比性。
+2. **检索七条 track**：机制 / 治疗 / 生物标志物 / 自然史与安全性 / 指南共识 / 临床试验 / 预印本。检索式**必须**逐字使用 `references/search-queries.md` 中的固化查询，不得即兴改写；改写会破坏月度可比性。
 3. **抓取与去重**：优先运行 `scripts/fetch_evidence.py`（确定性工作，不交给模型）。按 `PMID` → `DOI` → 注册号 → 规范化标题的顺序去重，规则见 `references/state-schema.md`。
 4. **试验状态差分**：track F 追踪的是**状态变更**（招募中→完成、方案修订、结果公布、提前终止），不只是「新出现的试验」。用 `status_hash` 比对，规则见 `references/state-schema.md`。
 5. **表型归一化**：在解读任何结论前，先标注研究人群的年龄段（儿童/成人/混合）与疾病表型（活检确诊 MCD / SSNS 临床表型 / FSGS / 未分层）。这一步先于打分。
@@ -57,14 +57,18 @@ disclaimer: 研究与证据监测用途，不构成医疗建议，不替代临�
 
 - **日期字段必须用 `[EDAT]`（Entrez 入库日），不得用 `[PDAT]`（出版日）。** PDAT 会被期刊回填和乱序，用于滚动窗口必然同时造成漏检与重复。
 - PubMed 走 E-utilities（`esearch` → `esummary`/`efetch`）。无 API key 时限速 3 req/s；设置 `NCBI_API_KEY` 后可到 10 req/s。
-- 临床试验走 ClinicalTrials.gov API v2，按 `AREA[LastUpdatePostDate]RANGE[...]` 过滤，翻页用 `nextPageToken`。
+- 临床试验走三个注册库：ClinicalTrials.gov v2（服务端日期过滤）、ISRCTN（XML，客户端按 `lastUpdated` 过滤）、
+  EU CTIS（POST JSON，客户端过滤）。CTRI / jRCT / ChiCTR / WHO ICTRP 无可用 API，是已声明的覆盖缺口。
+- 预印本走 Europe PMC `SRC:PPR`（覆盖 medRxiv / bioRxiv / Research Square）。预印本按 rubric 扣 1 分；
+  预印本转正式发表由 `title_norm` 去重自动捕捉，不会重复报告。
+- **单个数据源抓取失败不终止运行**，但失败项必须原样写进简报的「方法学与局限」小节，不得静默吞掉。
 - 抗 nephrin 抗体同时命中 track A（机制）与 track C（生物标志物）。去重逻辑必须**保留跨 track 命中标记**，不得把它折叠成单一 track，否则会丢掉临床转化这条线。
 
 ## 参考文件
 
 | 文件 | 内容 | 何时加载 |
 |---|---|---|
-| `references/search-queries.md` | 六条 track 的固化检索式 | 执行检索前 |
+| `references/search-queries.md` | 七条 track 的固化检索式与各注册库接口 | 执行检索前 |
 | `references/scoring-rubric.md` | 三维量表、锚点、入选阈值、阴性结果通道 | 打分与分诊时 |
 | `references/state-schema.md` | `seen.json` schema、去重与状态差分规则 | 去重与回写时 |
 | `templates/brief-template.md` | 简报章节与必填字段 | 撰写简报时 |

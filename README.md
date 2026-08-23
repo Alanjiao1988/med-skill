@@ -4,7 +4,7 @@
 
 ## 目标
 
-每月产出一份简体中文**增量**证据简报（delta brief），覆盖机制、治疗、生物标志物、自然史与安全性、指南共识、临床试验六条 track。
+每月产出一份简体中文**增量**证据简报（delta brief），覆盖机制、治疗、生物标志物、自然史与安全性、指南共识、临床试验、预印本七条 track。
 调度与投递由宿主应用负责；本仓库只定义技能本身。
 
 ## 设计原则
@@ -22,14 +22,14 @@
 ```
 SKILL.md                              技能主文件（frontmatter + 工作流 + 硬约束）
 references/
-  search-queries.md                   六条 track 的固化检索式（唯一真源，脚本从此解析）
+  search-queries.md                   七条 track 的固化检索式与注册库接口（唯一真源，脚本从此解析）
   scoring-rubric.md                   三维量表、锚点、入选阈值、阴性结果豁免通道
   state-schema.md                     seen.json schema、去重顺序、试验状态差分规则
 templates/
   brief-template.md                   简报章节与必填字段
   patient-profile.example.md          患者画像模板
 scripts/
-  fetch_evidence.py                   检索/抓取/去重/状态差分（仅标准库）
+  fetch_evidence.py                   检索/抓取/去重/状态差分，5 个数据源（仅标准库）
 state/
   seen.example.json                   状态文件示例（真实 seen.json 已 gitignore）
 tests/
@@ -62,6 +62,21 @@ python scripts/fetch_evidence.py --commit-state
 - track F 追踪的是试验**状态变更**（招募→完成、方案修订、结果公布、提前终止），不只是新登记。
 - 抗 nephrin 抗体等条目会同时命中机制与生物标志物 track，去重时保留跨 track 标记，不折叠。
 - 只在简报成功生成后回写 state，避免失败运行永久跳过一个窗口。
+- 单个数据源抓取失败不终止运行，但会写进 `source_errors`，必须带进简报的方法学小节。
+
+## 数据源覆盖
+
+| 源 | 覆盖 | 日期过滤 |
+|---|---|---|
+| PubMed E-utilities | track A–E 文献 | 服务端 `[EDAT]` |
+| ClinicalTrials.gov v2 | 试验 | 服务端 `LastUpdatePostDate` |
+| ISRCTN | 试验（英国及国际） | 客户端 `@lastUpdated` |
+| EU CTIS | 试验（欧盟） | 客户端 `lastUpdated` |
+| Europe PMC `SRC:PPR` | 预印本 medRxiv / bioRxiv 等 | 服务端 `FIRST_PDATE` |
+
+**已知缺口**（无可用 API，需人工按季度在门户抽查）：CTRI（印度）、jRCT（日本）、ChiCTR（中国）、
+WHO ICTRP、会议摘要、非英文文献。CTRI 只有 PHP 表单，jRCT / ChiCTR 只有 HTML 检索页；
+HTML 抓取在医疗监测场景里会静默失效，风险高于收益，故不做。
 
 ## 隐私
 

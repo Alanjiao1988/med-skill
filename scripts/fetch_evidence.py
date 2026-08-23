@@ -22,6 +22,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta
 
 # Windows 控制台默认非 UTF-8，中文日志会乱码
@@ -38,6 +39,10 @@ OUT_DIR = os.path.join(ROOT, "out")
 
 EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 CTGOV = "https://clinicaltrials.gov/api/v2/studies"
+ISRCTN = "https://www.isrctn.com/api/query/format/default"
+CTIS = "https://euclinicaltrials.eu/ctis-public-api/search"
+EPMC = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+ISRCTN_NS = "{http://www.67bricks.com/isrctn}"
 API_KEY = os.environ.get("NCBI_API_KEY", "")
 SLEEP = 0.11 if API_KEY else 0.34          # 10 req/s with key, 3 req/s without
 WINDOW_OVERLAP_DAYS = 15
@@ -56,6 +61,49 @@ def http_json(url, retries=4):
             if attempt == retries - 1:
                 raise
             time.sleep(2 ** attempt)
+    return None
+
+
+def http_text(url, retries=3):
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": UA})
+            with urllib.request.urlopen(req, timeout=90) as r:
+                return r.read().decode("utf-8", "replace")
+        except Exception:
+            if attempt == retries - 1:
+                raise
+            time.sleep(2 ** attempt)
+    return ""
+
+
+def http_post_json(url, body, retries=3):
+    payload = json.dumps(body).encode("utf-8")
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(
+                url, data=payload,
+                headers={"User-Agent": UA, "Content-Type": "application/json",
+                         "Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except Exception:
+            if attempt == retries - 1:
+                raise
+            time.sleep(2 ** attempt)
+    return None
+
+
+def parse_date_loose(s):
+    """接受 2026-08-20、2026-08-20T…、20/08/2026 三种格式；解析不了返回 None。"""
+    s = (s or "").strip()
+    if not s:
+        return None
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(s[:10], fmt).date()
+        except ValueError:
+            pass
     return None
 
 
@@ -170,6 +218,8 @@ def flatten_trial(s):
     nct = ident.get("nctId", "")
     raw = overall + "|" + phases + "|" + str(has_results) + "|" + pcd
     return {
+        "registry": "CTGOV",
+        "id": nct,
         "nct": nct,
         "title": ident.get("briefTitle", ""),
         "status": overall,
@@ -206,6 +256,135 @@ def fetch_trials(start, end):
     return [flatten_trial(s) for s in studies]
 
 
+# ---------- ISRCTN ----------
+
+def _isrctn_text(node, path):
+    if node is None:
+        return ""
+    el = node.find(ISRCTN_NS + path)
+    return (el.text or "").strip() if el is not None else ""
+
+
+def fetch_isrctn(start, end):
+    """ISRCTN 无可用的服务端日期过滤，命中量小（nephrotic 全库 ~60 条），
+    因此全量取回后按 lastUpdated 在客户端过滤。"""
+    xml = http_text(ISRCTN + "?" + urllib.parse.urlencode(
+        {"q": "nephrotic syndrome OR minimal change disease", "limit": 500}))
+    root = ET.fromstring(xml)
+    out = []
+    for full in root.findall(ISRCTN_NS + "fullTrial"):
+        tr = full.find(ISRCTN_NS + "trial")
+        if tr is None:
+            continue
+        updated = parse_date_loose(tr.attrib.get("lastUpdated", ""))
+        if not updated or not (start <= updated <= end):
+            continue
+        desc = tr.find(ISRCTN_NS + "trialDescription")
+        design = tr.find(ISRCTN_NS + "trialDesign")
+        part = tr.find(ISRCTN_NS + "participants")
+        res = tr.find(ISRCTN_NS + "results")
+        rid = tr.attrib.get("publicIdentifierCanonical", "")
+        # ISRCTN 不暴露统一的 overallStatus；version 每次编辑递增，是最可靠的变更信号
+        version = tr.attrib.get("version", "")
+        pub_stage = _isrctn_text(res, "publicationStage")
+        raw = "|".join([version, _isrctn_text(design, "overallEndDate"),
+                        _isrctn_text(part, "recruitmentEnd"), pub_stage])
+        out.append({
+            "registry": "ISRCTN",
+            "id": rid,
+            "nct": rid,                       # 复用统一 key 前缀逻辑
+            "title": _isrctn_text(desc, "title") or _isrctn_text(desc, "scientificTitle"),
+            "status": "version " + version + (" · " + pub_stage if pub_stage else ""),
+            "phases": _isrctn_text(design, "phase"),
+            "has_results": bool(pub_stage),
+            "min_age": _isrctn_text(part, "lowerAgeLimit"),
+            "std_ages": [_isrctn_text(part, "ageRange")],
+            "primary_completion": _isrctn_text(design, "overallEndDate")[:10],
+            "last_update_posted": str(updated),
+            "url": "https://www.isrctn.com/" + rid,
+            "status_hash": hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16],
+        })
+    return out
+
+
+# ---------- EU CTIS ----------
+
+def fetch_ctis(start, end):
+    """CTIS 无服务端日期过滤，按 lastUpdated 在客户端过滤。
+    ctStatus 是不透明的整数码，原样保留，不臆造标签。"""
+    out, page = [], 1
+    while True:
+        data = http_post_json(CTIS, {
+            "pagination": {"page": page, "size": 100},
+            "searchCriteria": {"containAll": "nephrotic syndrome"},
+        })
+        rows = (data or {}).get("data", [])
+        for r in rows:
+            updated = parse_date_loose(r.get("lastUpdated"))
+            if not updated or not (start <= updated <= end):
+                continue
+            ct = r.get("ctNumber", "")
+            has_results = str(r.get("resultsFirstReceived", "")).lower() == "yes"
+            raw = "|".join([str(r.get("ctStatus", "")), str(r.get("trialPhase", "")),
+                            str(has_results), str(r.get("decisionDateOverall", ""))])
+            out.append({
+                "registry": "CTIS",
+                "id": ct,
+                "nct": ct,
+                "title": r.get("ctTitle", ""),
+                "status": "ctStatus=" + str(r.get("ctStatus", "")),
+                "phases": r.get("trialPhase", ""),
+                "has_results": has_results,
+                "min_age": "",
+                "std_ages": [a.strip() for a in str(r.get("ageGroup", "")).split(",") if a.strip()],
+                "primary_completion": "",
+                "conditions": r.get("conditions", ""),
+                "last_update_posted": str(updated),
+                "url": "https://euclinicaltrials.eu/ctis-public/view/" + ct,
+                "status_hash": hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16],
+            })
+        pg = (data or {}).get("pagination", {})
+        if not pg.get("nextPage"):
+            break
+        page += 1
+        time.sleep(0.3)
+    return out
+
+
+# ---------- 预印本 (Europe PMC) ----------
+
+def fetch_preprints(start, end):
+    """Europe PMC 的 SRC:PPR 覆盖 medRxiv / bioRxiv 等预印本服务器。
+    预印本按 rubric 的降级规则扣 1 分；预印本转正式发表由 title_norm 去重捕捉。"""
+    query = ('("nephrotic syndrome" OR "minimal change disease" OR "podocyte") '
+             'AND SRC:PPR AND FIRST_PDATE:[{:%Y-%m-%d} TO {:%Y-%m-%d}]'.format(start, end))
+    out, cursor = [], "*"
+    while True:
+        p = {"query": query, "format": "json", "pageSize": 100,
+             "resultType": "core", "cursorMark": cursor}
+        data = http_json(EPMC + "?" + urllib.parse.urlencode(p))
+        rows = (data or {}).get("resultList", {}).get("result", [])
+        for r in rows:
+            out.append({
+                "source": "preprint",
+                "epmc_id": r.get("id", ""),
+                "pmid": r.get("pmid", ""),
+                "doi": norm_doi(r.get("doi")),
+                "title": r.get("title", ""),
+                "journal": r.get("publisher") or "preprint",
+                "pubdate": r.get("firstPublicationDate", ""),
+                "pubtypes": ["Preprint"],
+                "track": ["A"],
+                "url": "https://europepmc.org/article/PPR/" + r.get("id", ""),
+            })
+        nxt = (data or {}).get("nextCursorMark")
+        if not rows or not nxt or nxt == cursor:
+            break
+        cursor = nxt
+        time.sleep(0.3)
+    return out
+
+
 # ---------- state ----------
 
 def load_state():
@@ -223,12 +402,22 @@ def write_state_atomic(state):
     os.replace(tmp, STATE_PATH)
 
 
+KEY_PREFIX = {"CTGOV": "NCT:", "ISRCTN": "ISRCTN:", "CTIS": "CTIS:"}
+
+
+def trial_key(t):
+    """CTGOV 沿用历史的 NCT: 前缀，保持既有 state 兼容。"""
+    return KEY_PREFIX.get(t.get("registry", "CTGOV"), "TRIAL:") + t["id"]
+
+
 def seen_key_lookup(seen, rec):
-    """按 PMID -> DOI -> 注册号 -> 规范化标题 的顺序查找已有条目。"""
+    """按 PMID -> 注册号 -> DOI -> 规范化标题 的顺序查找已有条目。"""
     if rec.get("pmid") and "PMID:" + rec["pmid"] in seen:
         return "PMID:" + rec["pmid"]
-    if rec.get("nct") and "NCT:" + rec["nct"] in seen:
-        return "NCT:" + rec["nct"]
+    if rec.get("registry") and rec.get("id") and trial_key(rec) in seen:
+        return trial_key(rec)
+    if rec.get("epmc_id") and "PPR:" + rec["epmc_id"] in seen:
+        return "PPR:" + rec["epmc_id"]
     doi, tn = norm_doi(rec.get("doi")), norm_title(rec.get("title"))
     for k, v in seen.items():
         if doi and v.get("doi") == doi:
@@ -272,6 +461,7 @@ def main():
               "，本期新增可能含追溯性命中，须在简报中标注", file=sys.stderr)
 
     seen = (state or {}).get("seen", {})
+    source_errors = []
     print("窗口 " + str(start) + " ~ " + str(end) + " · 模式 " + mode +
           " · 检索式 v" + str(qver), file=sys.stderr)
 
@@ -300,10 +490,25 @@ def main():
         else:
             new_papers.append(rec)
 
-    # --- track F: 追踪状态变更，不只是新出现 ---
+    # --- track F: 追踪状态变更，不只是新出现；三个注册库 ---
+    trials = []
+    for label, fn in (("ClinicalTrials.gov", fetch_trials),
+                      ("ISRCTN", fetch_isrctn),
+                      ("EU CTIS", fetch_ctis)):
+        try:
+            got = fn(start, end)
+            trials.extend(got)
+            print("  " + label + ": " + str(len(got)) + " 条", file=sys.stderr)
+        except Exception as ex:
+            # 单个注册库不可用不应让整次运行失败，但必须在简报中声明覆盖缺口
+            print("  ! " + label + " 抓取失败: " + type(ex).__name__ + " " + str(ex)[:120],
+                  file=sys.stderr)
+            source_errors.append(label + ": " + type(ex).__name__)
+
     trials_new, trials_changed = [], []
-    for t in fetch_trials(start, end):
-        prior = seen.get("NCT:" + t["nct"])
+    for t in trials:
+        key = trial_key(t)
+        prior = seen.get(key)
         prev_status = str((prior or {}).get("last_status", "?"))
         if not prior:
             t["change"] = "新登记"
@@ -319,6 +524,19 @@ def main():
     print("Track F: 新登记 " + str(len(trials_new)) +
           " · 状态变更 " + str(len(trials_changed)), file=sys.stderr)
 
+    # --- 预印本 (Europe PMC) ---
+    preprints = []
+    try:
+        for pp in fetch_preprints(start, end):
+            key = seen_key_lookup(seen, pp)
+            if key:
+                continue                      # 已见过，或已由正式发表版本捕捉
+            preprints.append(pp)
+        print("预印本: " + str(len(preprints)) + " 条新增", file=sys.stderr)
+    except Exception as ex:
+        print("! 预印本抓取失败: " + type(ex).__name__ + " " + str(ex)[:120], file=sys.stderr)
+        source_errors.append("Europe PMC preprints: " + type(ex).__name__)
+
     os.makedirs(OUT_DIR, exist_ok=True)
     period = "{:%Y-%m}".format(end)
     payload = {
@@ -333,11 +551,21 @@ def main():
             "cross_track_updates": len(confirm_papers),
             "trials_new": len(trials_new),
             "trials_changed": len(trials_changed),
+            "preprints": len(preprints),
+            "trials_by_registry": {
+                reg: sum(1 for t in trials if t.get("registry") == reg)
+                for reg in ("CTGOV", "ISRCTN", "CTIS")
+            },
         },
+        # 抓取失败的源必须原样带进简报的「方法学与局限」，不得静默吞掉
+        "source_errors": source_errors,
+        "known_gaps": ["CTRI (India)", "jRCT (Japan)", "ChiCTR (China)",
+                       "会议摘要", "非英文文献"],
         "new_papers": new_papers,
         "cross_track_updates": confirm_papers,
         "trials_new": trials_new,
         "trials_changed": trials_changed,
+        "preprints": preprints,
     }
     out_path = os.path.join(OUT_DIR, "candidates-" + period + ".json")
     with open(out_path, "w", encoding="utf-8") as f:
@@ -357,11 +585,17 @@ def main():
         entry["doi"] = rec.get("doi", "")
         entry["title_norm"] = norm_title(rec.get("title"))
     for t in trials_new + trials_changed:
-        e = state["seen"].setdefault("NCT:" + t["nct"],
+        e = state["seen"].setdefault(trial_key(t),
                                      {"first_seen": str(today), "track": ["F"]})
-        e.update({"last_status": t["status"], "has_results": t["has_results"],
+        e.update({"registry": t.get("registry", "CTGOV"),
+                  "last_status": t["status"], "has_results": t["has_results"],
                   "status_hash": t["status_hash"], "title_norm": norm_title(t["title"]),
                   "last_update_posted": t["last_update_posted"]})
+    for pp in preprints:
+        e = state["seen"].setdefault("PPR:" + pp["epmc_id"],
+                                     {"first_seen": str(today), "track": pp["track"]})
+        e.update({"doi": pp.get("doi", ""), "title_norm": norm_title(pp.get("title")),
+                  "is_preprint": True})
     state["queries_version"] = qver
     state["last_run"] = str(today)
     state["window_end_edat"] = str(end)

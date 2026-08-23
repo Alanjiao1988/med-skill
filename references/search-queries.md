@@ -128,4 +128,63 @@ GET https://clinicaltrials.gov/api/v2/studies
 | 结果是否公布 | `hasResults` |
 | 最近更新日 | `protocolSection.statusModule.lastUpdatePostDateStruct.date` |
 
-其他注册库（本期未脚本化，作为已知缺口）：ISRCTN、CTRI（印度，儿童肾病病例量大）、jRCT、ChiCTR。
+### ISRCTN
+
+```
+GET https://www.isrctn.com/api/query/format/default
+  ?q=nephrotic syndrome OR minimal change disease
+  &limit=500
+```
+
+返回 XML（命名空间 `http://www.67bricks.com/isrctn`）。**无服务端日期过滤**，全库命中量小
+（nephrotic 约 60 条），因此全量取回后按 `trial/@lastUpdated` 在客户端过滤。
+
+ISRCTN 不暴露统一的 `overallStatus` 字段（网页上的招募状态是由日期加 override 推导的）。
+`trial/@version` 每次记录编辑递增，是最可靠的变更信号，因此 `status_hash` 由
+`version | overallEndDate | recruitmentEnd | publicationStage` 组成。
+
+### EU CTIS
+
+```
+POST https://euclinicaltrials.eu/ctis-public-api/search
+Content-Type: application/json
+
+{"pagination": {"page": 1, "size": 100},
+ "searchCriteria": {"containAll": "nephrotic syndrome"}}
+```
+
+同样无服务端日期过滤，按 `lastUpdated`（`DD/MM/YYYY`）客户端过滤。
+`ctStatus` 是不透明的整数码，**原样保留，不臆造状态标签**。
+`ageGroup` 含 `0-17 years` 时才是儿童试验——CTIS 里相当一部分肾病综合征试验是纯成人的。
+
+### 未覆盖的注册库（已知缺口，须写进简报的方法学小节）
+
+| 注册库 | 状态 | 原因 |
+|---|---|---|
+| CTRI（印度） | **未覆盖** | 只有 PHP 表单，无检索 API；`POST advsearch.php` 实测只返回错误页 |
+| jRCT（日本） | **未覆盖** | 仅 HTML 检索页，无 API |
+| ChiCTR（中国） | **未覆盖** | 无公开 API |
+| WHO ICTRP | **未覆盖** | 聚合了上述三家，但 `trialsearch.who.int` 无可用 API（实测 404），全量导出需申请协议 |
+
+这几家都需要人工在门户上按季度抽查。CTRI 对儿童肾病综合征病例量不小，是当前最值得补的缺口——
+若要脚本化，只能走 HTML 抓取，而抓取在医疗监测场景里会静默失效，风险高于收益，故本期不做。
+
+---
+
+## Track G — 预印本（Europe PMC）
+
+```
+GET https://www.ebi.ac.uk/europepmc/webservices/rest/search
+  ?query=("nephrotic syndrome" OR "minimal change disease" OR "podocyte")
+         AND SRC:PPR
+         AND FIRST_PDATE:[YYYY-MM-DD TO YYYY-MM-DD]
+  &format=json&resultType=core&pageSize=100&cursorMark=*
+```
+
+`SRC:PPR` 覆盖 medRxiv、bioRxiv、Research Square 等预印本服务器。
+
+两条处理规则：
+
+1. 预印本按 `references/scoring-rubric.md` 的降级规则**扣 1 分**（未同行评议），且默认归入 track A。
+2. **预印本转正式发表**由 `title_norm` 去重自动捕捉——同一研究不会在预印本阶段和发表阶段各报一次。
+   这正是四级去重里要有规范化标题这一级的原因。

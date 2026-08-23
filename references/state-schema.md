@@ -51,8 +51,13 @@
 
 1. `PMID`
 2. `DOI`（小写、去 `https://doi.org/` 前缀）
-3. 试验注册号（`NCT` / `ISRCTN` / `ChiCTR` / `CTRI`，大写）
+3. 试验注册号，按注册库加前缀：`NCT:`（ClinicalTrials.gov，沿用历史前缀以兼容既有 state）、
+   `ISRCTN:`、`CTIS:`；预印本用 `PPR:` + Europe PMC id
 4. `title_norm`：小写 → 去除所有非字母数字字符 → 压缩空白。用于捕捉「预印本 → 正式发表」「会议摘要 → 全文」的同一研究
+
+**预印本转正式发表**：预印本以 `PPR:` 入 state；数月后同一研究在 PubMed 发表时，
+第 4 级 `title_norm` 会命中该条目，因此不会被重复报告为新发现。若发表版结论与预印本不一致，
+按 novelty 3 处理并在简报中写明「预印本 → 发表，结论变化」。
 
 **跨 track 命中不去重成单一 track**：同一 PMID 在多个 track 命中时，把 track 追加进 `track` 数组，不覆盖。
 
