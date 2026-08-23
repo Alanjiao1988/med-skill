@@ -1,88 +1,190 @@
 # med-skill
 
-儿童肾病综合征证据监测技能（living evidence surveillance），聚焦微小病变肾病（MCD）及临床重叠表型：SSNS、FRNS、SDNS。
+一个可移植的 Agent Skill：按月监测儿童肾病综合征 / 微小病变肾病（MCD）相关证据，重点覆盖 SSNS、FRNS、SDNS，并生成简体中文 living evidence delta brief。
 
 ## 目标
 
-每月产出一份简体中文**增量**证据简报（delta brief），覆盖机制、治疗、生物标志物、自然史与安全性、指南共识、临床试验、预印本七条 track。
-调度与投递由宿主应用负责；本仓库只定义技能本身。
+每月回答三个问题：
 
-## 设计原则
+1. 本期真正出现了什么新的学术/临床证据？
+2. 这些证据相对既有 baseline 是确认、扩展、挑战还是可能改变实践？
+3. 哪些证据与儿童 MCD/SSNS/FRNS/SDNS 的真实临床问题最相关？
 
-- 不把 SSNS 等同于活检确诊的 MCD。
-- 儿童证据与成人证据分开。
-- 机制证据与临床证据分开。
-- 科学重要性与患者相关性分开打分，不合成总分。
-- 追踪月度证据**变化量**，而不是每月重写一份泛化综述。
-- 滚动检索窗口 + 持久化 PMID/试验注册号去重。
-- 明确写出每项研究**证明了什么**与**没有证明什么**。
+宿主应用负责调度和最终投递；仓库本身不绑定 Gmail、Outlook 或 SMTP，也不硬编码个人邮箱。
+
+## 六个证据领域
+
+- A：机制（mechanism）
+- B：治疗（treatment）
+- C：生物标志物与精准表型（biomarker / precision phenotyping）
+- D：自然史与安全性（natural history / safety）
+- E：指南与共识（guideline / consensus）
+- F：临床试验注册与状态变化（clinical trials）
+
+**预印本不是第七个领域。** Europe PMC `SRC:PPR` 是补充来源；预印本仍映射回 A–E，并单独标记 `peer_review_status=preprint`。
+
+## 核心设计原则
+
+- 不把 SSNS 当成 biopsy-confirmed MCD。
+- 成人证据可以被发现，但儿童适用性必须单独标注。
+- 机制证据、biomarker 证据、治疗证据使用各自适合的 evidence-strength 锚点。
+- S（strength）/ N（novelty）/ R（patient relevance）分别评价，不合成总分。
+- PubMed 使用 EDAT 滚动窗口并分页取全；候选至少抓取 abstract。
+- 拟进入正文的研究，有合法全文时优先阅读全文；仅摘要时必须标记 `abstract_only`。
+- 预印本不能更新正式 baseline，也不能单独形成 practice-changing 结论。
+- 预印本正式发表后重新进入流程，作为 `publication_transition` 重新评分。
+- 只报告相对既有 baseline 的增量，不每月重写泛化综述。
+- 每条 material study 都必须写 `what_this_changes` 和 `what_this_does_not_prove`。
 
 ## 仓库结构
 
-```
-SKILL.md                              技能主文件（frontmatter + 工作流 + 硬约束）
+```text
+SKILL.md                              Agent Skill 主文件
 references/
-  search-queries.md                   七条 track 的固化检索式与注册库接口（唯一真源，脚本从此解析）
-  scoring-rubric.md                   三维量表、锚点、入选阈值、阴性结果豁免通道
-  state-schema.md                     seen.json schema、去重顺序、试验状态差分规则
+  search-queries.md                   A–F 固化检索策略、注册库/预印本来源规则
+  scoring-rubric.md                   claim-specific S/N/R 评级与分诊
+  state-schema.md                     candidate→decision→state 两阶段状态协议
 templates/
-  brief-template.md                   简报章节与必填字段
-  patient-profile.example.md          患者画像模板
+  brief-template.md                   月度简报模板
+  patient-profile.example.md          私有患者画像模板
+  decisions.example.json              state commit 决策文件示例
 scripts/
-  fetch_evidence.py                   检索/抓取/去重/状态差分，5 个数据源（仅标准库）
+  fetch_evidence.py                   确定性抓取、去重、trial diff、state commit
 state/
-  seen.example.json                   状态文件示例（真实 seen.json 已 gitignore）
+  seen.example.json                   schema v2 示例；真实 seen.json 被 gitignore
 tests/
-  README.md                           回归夹具与检查清单
+  README.md                           回归验证说明
 ```
 
-## 运行
+## 运行流程
+
+### 1. 首次建立 24 个月 baseline 候选集
 
 ```bash
-# 首次：建立 24 个月基线
 python scripts/fetch_evidence.py --bootstrap
-
-# 每月：从 state 推导窗口（自动重叠 15 天）
-python scripts/fetch_evidence.py
-
-# 简报生成成功后才回写 state
-python scripts/fetch_evidence.py --commit-state
 ```
 
-产物为 `out/candidates-YYYY-MM.json`，交由模型按 `references/scoring-rubric.md` 打分、按
-`templates/brief-template.md` 撰写简报。
+### 2. 正常月度抓取
 
-可选环境变量 `NCBI_API_KEY`（有 key 时 E-utilities 限速从 3 req/s 提到 10 req/s）。
+```bash
+python scripts/fetch_evidence.py
+```
 
-## 关键实现约定
+脚本输出：
 
-- 日期字段**必须**用 `[EDAT]`（Entrez 入库日），不得用 `[PDAT]`（出版日）。PDAT 会被期刊回填和乱序，
-  用于滚动窗口必然同时造成漏检与重复。脚本会在检出 `[PDAT]` 时直接报错退出。
-- 检索式改动须 bump `queries_version`，下一期简报必须标注可能含追溯性命中。
-- track F 追踪的是试验**状态变更**（招募→完成、方案修订、结果公布、提前终止），不只是新登记。
-- 抗 nephrin 抗体等条目会同时命中机制与生物标志物 track，去重时保留跨 track 标记，不折叠。
-- 只在简报成功生成后回写 state，避免失败运行永久跳过一个窗口。
-- 单个数据源抓取失败不终止运行，但会写进 `source_errors`，必须带进简报的方法学小节。
+```text
+out/candidates-YYYY-MM.json
+```
 
-## 数据源覆盖
+其中包含唯一 `run_id`。抓取阶段**不会修改 state**。
 
-| 源 | 覆盖 | 日期过滤 |
+### 3. 宿主 AI 进行证据解读并生成简报
+
+宿主读取：
+
+- `SKILL.md`
+- `references/scoring-rubric.md`
+- `templates/brief-template.md`
+- 当期 `out/candidates-YYYY-MM.json`
+- 可选私有 `patient-profile.md`
+
+然后生成：
+
+```text
+out/brief-YYYY-MM.md
+out/decisions-YYYY-MM.json
+```
+
+`decisions` 必须复用 candidates 中相同的 `run_id`，并设置：
+
+```json
+"brief_generated": true
+```
+
+### 4. 只有简报成功后才提交 state
+
+```bash
+python scripts/fetch_evidence.py --commit-state \
+  --candidates out/candidates-YYYY-MM.json \
+  --decisions out/decisions-YYYY-MM.json
+```
+
+commit 阶段**不会重新联网检索**。这保证写入 state 的就是刚才实际分析并形成简报的那一批候选，而不是一个时间上已发生漂移的新抓取结果。
+
+## 数据源
+
+### 核心来源
+
+| 来源 | 用途 | 当前策略 |
 |---|---|---|
-| PubMed E-utilities | track A–E 文献 | 服务端 `[EDAT]` |
-| ClinicalTrials.gov v2 | 试验 | 服务端 `LastUpdatePostDate` |
-| ISRCTN | 试验（英国及国际） | 客户端 `@lastUpdated` |
-| EU CTIS | 试验（欧盟） | 客户端 `lastUpdated` |
-| Europe PMC `SRC:PPR` | 预印本 medRxiv / bioRxiv 等 | 服务端 `FIRST_PDATE` |
+| PubMed E-utilities | A–E 正式文献 | `[EDAT]` + 分页取全 + EFetch abstract |
 
-**已知缺口**（无可用 API，需人工按季度在门户抽查）：CTRI（印度）、jRCT（日本）、ChiCTR（中国）、
-WHO ICTRP、会议摘要、非英文文献。CTRI 只有 PHP 表单，jRCT / ChiCTR 只有 HTML 检索页；
-HTML 抓取在医疗监测场景里会静默失效，风险高于收益，故不做。
+PubMed 是核心来源；若其抓取不完整，本期运行应失败，而不是生成一个伪“完整”简报。
 
-## 隐私
+### 补充来源
 
-`patient-profile.md` 与 `state/seen.json` 含健康相关信息，已在 `.gitignore` 中排除，不要提交。
-投递地址由宿主应用配置传入，不在本仓库硬编码。
+| 来源 | 用途 | 状态 |
+|---|---|---|
+| ClinicalTrials.gov API v2 | Track F | integrated |
+| ISRCTN XML API | Track F | integrated |
+| EU CTIS public portal backend | Track F | integrated, experimental endpoint stability |
+| Europe PMC `SRC:PPR` | 预印本 | integrated |
+| KDIGO / IPNA / ESPN / ERA 官网 | 指南核验 | host-assisted |
+| WHO ICTRP | 全球试验聚合 | `available_but_not_integrated` |
+
+WHO ICTRP 官方提供 Search Portal、XML/CSV 下载以及研究用途 Web Service；因此不能把它描述成“没有 API”。
+
+### 当前未稳定单独接入
+
+- CTRI
+- jRCT / JPRN
+- ChiCTR
+- 部分区域数据库与非 PubMed 索引来源
+
+这些状态写为 `not_integrated_or_not_verified`，而不是永久断言“无 API”。PubMed 检索本身没有设置英语过滤，因此局限不是“非英文文献全部未覆盖”，而是**非 PubMed 索引的区域/非索引文献未系统覆盖**。
+
+## 状态安全
+
+真实文件：
+
+```text
+patient-profile.md
+state/seen.json
+out/
+```
+
+均不应提交到 GitHub。`patient-profile.md` 包含健康隐私；`state/seen.json` 可能包含 patient relevance 评分痕迹。
+
+## 检索式与 schema 版本
+
+当前：
+
+```text
+Skill: 0.3.0
+queries_version: 2
+state schema_version: 2
+```
+
+从旧 v0.2 state 升级时，首次运行可能把旧 trial `status_hash` 视为需要重新建立 `protocol_hash` 的 `protocol_record_updated`；这属于一次性 migration，不应误写成真实临床状态改变。
+
+## 宿主投递
+
+宿主运行时提供：
+
+```json
+{
+  "config": {
+    "recipient": "<email-address>"
+  }
+}
+```
+
+Skill 输出 Markdown / text / HTML 邮件正文。若宿主具有邮件工具则发送；否则返回：
+
+```json
+"delivery_pending": true
+```
 
 ## 免责
 
-本仓库用于研究与证据监测，**不构成医疗建议，不替代临床诊疗**。任何治疗调整须与主诊医师讨论。
+本项目用于研究与证据监测，**不构成医疗建议，不替代临床诊疗**。任何具体治疗调整应由患儿的临床团队结合完整病史决定。
