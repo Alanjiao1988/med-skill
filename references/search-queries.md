@@ -1,44 +1,55 @@
 # 固化检索式
 
-> **不得即兴改写。** 检索式是月度可比性的基础；任何修改都会让 delta 失去意义。
-> 确需调整时：修改后 bump 本文件顶部的 `queries_version`，并在 `state/seen.json` 中记录变更，
-> 下一期简报必须标注「检索式已变更，本期新增条目可能包含追溯性命中」。
+> 检索式用于保证月度可比性，不得临时改写。确需调整时必须 bump `queries_version`，并在下一期简报中说明可能出现追溯性命中。
 
-```
-queries_version: 1
-date_field: EDAT   # 强制。不得改为 PDAT。
+```text
+queries_version: 2
+date_field: EDAT
 ```
 
-## 通用片段
+## 证据领域与来源
 
-以下片段在各 track 中复用，记为 `{PEDS}`、`{DISEASE}`、`{WINDOW}`。
+A–F 是**内容领域**：机制、治疗、生物标志物、自然史/安全性、指南/共识、临床试验。
 
-```
+`preprint` 是**来源/同行评议状态**，不是 Track G。预印本必须重新归入 A–E 的一个或多个领域。
+
+## 通用 PubMed 片段
+
+```text
 {PEDS} =
-("child"[MeSH] OR "infant"[MeSH] OR "adolescent"[MeSH]
+("Child"[MeSH] OR "Infant"[MeSH] OR "Adolescent"[MeSH]
  OR child*[tiab] OR pediatr*[tiab] OR paediatr*[tiab] OR infant*[tiab] OR adolescen*[tiab])
 
 {DISEASE} =
 ("Nephrosis, Lipoid"[MeSH] OR "Nephrotic Syndrome"[MeSH]
- OR "minimal change disease"[tiab] OR "minimal change nephrotic syndrome"[tiab]
- OR "nephrotic syndrome"[tiab] OR "idiopathic nephrotic syndrome"[tiab]
- OR "steroid sensitive nephrotic syndrome"[tiab] OR "steroid-sensitive"[tiab]
- OR "steroid dependent nephrotic syndrome"[tiab] OR "steroid-dependent"[tiab]
- OR "frequently relapsing"[tiab] OR SSNS[tiab] OR SDNS[tiab] OR FRNS[tiab] OR MCD[tiab])
+ OR "minimal change disease"[tiab] OR "minimal change nephropathy"[tiab]
+ OR "minimal change nephrotic syndrome"[tiab]
+ OR "idiopathic nephrotic syndrome"[tiab]
+ OR "steroid sensitive nephrotic syndrome"[tiab]
+ OR "steroid-sensitive nephrotic syndrome"[tiab]
+ OR "steroid dependent nephrotic syndrome"[tiab]
+ OR "steroid-dependent nephrotic syndrome"[tiab]
+ OR "frequently relapsing nephrotic syndrome"[tiab]
+ OR "frequent relapsing nephrotic syndrome"[tiab]
+ OR (SSNS[tiab] AND nephrotic[tiab])
+ OR (SDNS[tiab] AND nephrotic[tiab])
+ OR (FRNS[tiab] AND nephrotic[tiab])
+ OR (MCD[tiab] AND (nephrotic[tiab] OR kidney[tiab] OR renal[tiab] OR podocyt*[tiab])))
 
 {WINDOW} =
 ("YYYY/MM/DD"[EDAT] : "YYYY/MM/DD"[EDAT])
 ```
 
-> `{DISEASE}` 故意包含成人条目——成人证据要被**检出并标注为成人**，而不是在检索层被丢掉。
-> 是否外推由硬约束 2 在解读层控制，不在检索层控制。
-> `{PEDS}` 只用于 track B/D/F（临床类），A/C（机制与标志物）不加，避免漏掉未标注人群的基础研究。
+说明：
+- 不使用裸 `MCD`、`steroid-dependent`、`frequently relapsing` 作为独立疾病命中词，避免无关缩写/表型噪声。
+- A/C 不强制儿童过滤，以便捕捉成人或混合人群的机制/biomarker 证据；适用性在解读层标记。
+- B/D 使用 `{PEDS}`，优先儿童临床证据。
 
 ---
 
 ## Track A — 机制
 
-```
+```text
 {DISEASE}
 AND (podocyte*[tiab] OR "slit diaphragm"[tiab] OR nephrin[tiab] OR "anti-nephrin"[tiab]
      OR NEPH1[tiab] OR podocin[tiab] OR NPHS1[tiab] OR NPHS2[tiab]
@@ -51,7 +62,7 @@ AND {WINDOW}
 
 ## Track B — 治疗
 
-```
+```text
 {DISEASE} AND {PEDS}
 AND (glucocorticoid*[tiab] OR corticosteroid*[tiab] OR prednisolone[tiab] OR prednisone[tiab]
      OR rituximab[tiab] OR ofatumumab[tiab] OR obinutuzumab[tiab] OR "anti-CD20"[tiab]
@@ -64,7 +75,7 @@ AND {WINDOW}
 
 ## Track C — 生物标志物与精准表型
 
-```
+```text
 {DISEASE}
 AND (biomarker*[tiab] OR "anti-nephrin antibod*"[tiab] OR autoantibod*[tiab]
      OR proteom*[tiab] OR metabolom*[tiab] OR transcriptom*[tiab]
@@ -73,12 +84,11 @@ AND (biomarker*[tiab] OR "anti-nephrin antibod*"[tiab] OR autoantibod*[tiab]
 AND {WINDOW}
 ```
 
-> **打分时必须区分**：诊断（diagnostic）/ 预后（prognostic）/ 预测疗效（predictive）是三种不同功能，
-> 不得混用。一个标志物只在其被验证的那一类功能上计分。
+诊断（diagnostic）、预后（prognostic）、预测疗效（predictive）必须分别评价，不能互换。
 
 ## Track D — 自然史与安全性
 
-```
+```text
 {DISEASE} AND {PEDS}
 AND (relapse*[tiab] OR remission[tiab] OR "long term outcome*"[tiab] OR "natural history"[tiab]
      OR "transition to adult"[tiab] OR "chronic kidney disease"[tiab] OR "kidney failure"[tiab]
@@ -91,100 +101,106 @@ AND {WINDOW}
 
 ## Track E — 指南与共识
 
-```
+```text
 {DISEASE}
 AND (guideline*[tiab] OR "practice guideline"[pt] OR consensus[tiab] OR recommendation*[tiab]
-     OR KDIGO[tiab] OR IPNA[tiab] OR ESPN[tiab] OR ERA-EDTA[tiab] OR "position statement"[tiab])
+     OR KDIGO[tiab] OR IPNA[tiab] OR ESPN[tiab] OR ERA[tiab] OR "position statement"[tiab])
 AND {WINDOW}
 ```
 
-补充非索引来源（脚本无法覆盖，需人工/宿主抓取，命中即视为 novelty 3）：
-- KDIGO 官网 glomerular diseases 章节更新
-- IPNA 临床实践建议（clinical practice recommendations）
-- ESPN / ERA 工作组声明
+同时由宿主核验 KDIGO、IPNA、ESPN/ERA 官方页面。**官网发生更新本身不自动等于 novelty 3**；必须确认是否存在实质性推荐、证据等级、适用人群或安全性声明变化。
+
+---
 
 ## Track F — 临床试验
 
-ClinicalTrials.gov API v2：
+### ClinicalTrials.gov API v2
 
-```
+```text
 GET https://clinicaltrials.gov/api/v2/studies
-  ?query.cond=nephrotic syndrome OR minimal change disease
+  ?query.cond=(nephrotic syndrome OR minimal change disease OR steroid sensitive nephrotic syndrome OR steroid dependent nephrotic syndrome)
   &filter.advanced=AREA[LastUpdatePostDate]RANGE[YYYY-MM-DD,YYYY-MM-DD]
   &pageSize=200
   &countTotal=true
   &format=json
 ```
 
-**追踪的是状态变更，不是新出现。** 需要记录并比对的字段：
+最少记录：注册号、标题、overallStatus、phase、年龄、hasResults、lastUpdatePostDate、primary completion、enrollment。
 
-| 字段 | JSON 路径 |
-|---|---|
-| 注册号 | `protocolSection.identificationModule.nctId` |
-| 标题 | `protocolSection.identificationModule.briefTitle` |
-| 状态 | `protocolSection.statusModule.overallStatus` |
-| 期相 | `protocolSection.designModule.phases` |
-| 入组人群 | `protocolSection.eligibilityModule` (`minimumAge` / `stdAges`) |
-| 结果是否公布 | `hasResults` |
-| 最近更新日 | `protocolSection.statusModule.lastUpdatePostDateStruct.date` |
+**hash 变化不等于临床状态变化。** 如果 `overallStatus` 未变但 protocol hash 变化，应描述为 `protocol_record_updated`，而不是伪造 `X -> Y` 状态转换。
 
 ### ISRCTN
 
-```
+```text
 GET https://www.isrctn.com/api/query/format/default
-  ?q=nephrotic syndrome OR minimal change disease
+  ?q="nephrotic syndrome" OR "minimal change disease"
   &limit=500
 ```
 
-返回 XML（命名空间 `http://www.67bricks.com/isrctn`）。**无服务端日期过滤**，全库命中量小
-（nephrotic 约 60 条），因此全量取回后按 `trial/@lastUpdated` 在客户端过滤。
+ISRCTN 官方 API 支持 Boolean query。当前实现客户端按 `trial/@lastUpdated` 做窗口过滤。
 
-ISRCTN 不暴露统一的 `overallStatus` 字段（网页上的招募状态是由日期加 override 推导的）。
-`trial/@version` 每次记录编辑递增，是最可靠的变更信号，因此 `status_hash` 由
-`version | overallEndDate | recruitmentEnd | publicationStage` 组成。
+若 registry 字段不能可靠给出“结果已发表”，不得从非空字符串简单推断 `has_results=true`；保留原始 publication stage，并在解读层判断。
 
 ### EU CTIS
 
-```
-POST https://euclinicaltrials.eu/ctis-public-api/search
-Content-Type: application/json
+当前脚本使用 CTIS 公开门户 backend 进行检索。EMA 官方保证公众可以通过 CTIS public portal 检索试验，但本仓库使用的 backend 不是稳定版本化 API 合同，因此标记：
 
-{"pagination": {"page": 1, "size": 100},
- "searchCriteria": {"containAll": "nephrotic syndrome"}}
+```text
+source_stability: experimental_public_portal_backend
 ```
 
-同样无服务端日期过滤，按 `lastUpdated`（`DD/MM/YYYY`）客户端过滤。
-`ctStatus` 是不透明的整数码，**原样保留，不臆造状态标签**。
-`ageGroup` 含 `0-17 years` 时才是儿童试验——CTIS 里相当一部分肾病综合征试验是纯成人的。
+接口失败时必须进入 `source_errors`，不能静默跳过。
 
-### 未覆盖的注册库（已知缺口，须写进简报的方法学小节）
+### WHO ICTRP
 
-| 注册库 | 状态 | 原因 |
-|---|---|---|
-| CTRI（印度） | **未覆盖** | 只有 PHP 表单，无检索 API；`POST advsearch.php` 实测只返回错误页 |
-| jRCT（日本） | **未覆盖** | 仅 HTML 检索页，无 API |
-| ChiCTR（中国） | **未覆盖** | 无公开 API |
-| WHO ICTRP | **未覆盖** | 聚合了上述三家，但 `trialsearch.who.int` 无可用 API（实测 404），全量导出需申请协议 |
+WHO 官方提供：
+- ICTRP Search Portal；
+- 搜索结果 XML / CSV 下载；
+- 研究用途 Web Service（可能需要按 WHO 条件申请/配置）。
 
-这几家都需要人工在门户上按季度抽查。CTRI 对儿童肾病综合征病例量不小，是当前最值得补的缺口——
-若要脚本化，只能走 HTML 抓取，而抓取在医疗监测场景里会静默失效，风险高于收益，故本期不做。
+因此当前状态是：
+
+```text
+WHO_ICTRP: available_but_not_integrated
+```
+
+不能写成 `no_api`。WHO ICTRP 可聚合 ChiCTR、JPRN/jRCT、CTRI 等多国注册来源，是未来提高全球试验覆盖率的优先接入点。
+
+### 尚未稳定单独接入
+
+| 注册来源 | 当前状态 |
+|---|---|
+| CTRI | `not_integrated_or_not_verified` |
+| jRCT / JPRN | `not_integrated_or_not_verified` |
+| ChiCTR | `not_integrated_or_not_verified` |
+
+不要对这些服务作永久性的“没有 API”断言；每季度复核一次程序化访问能力。
 
 ---
 
-## Track G — 预印本（Europe PMC）
+## 预印本来源 — Europe PMC（不是 Track G）
 
-```
+```text
 GET https://www.ebi.ac.uk/europepmc/webservices/rest/search
-  ?query=("nephrotic syndrome" OR "minimal change disease" OR "podocyte")
+  ?query=("nephrotic syndrome" OR "minimal change disease" OR "minimal change nephropathy"
+          OR "steroid-sensitive nephrotic syndrome" OR "steroid-dependent nephrotic syndrome"
+          OR "frequently relapsing nephrotic syndrome")
          AND SRC:PPR
          AND FIRST_PDATE:[YYYY-MM-DD TO YYYY-MM-DD]
   &format=json&resultType=core&pageSize=100&cursorMark=*
 ```
 
-`SRC:PPR` 覆盖 medRxiv、bioRxiv、Research Square 等预印本服务器。
+规则：
+1. 不用裸 `podocyte` 做预印本入口，避免把整个足细胞领域的大量无关论文纳入 MCD surveillance。
+2. 根据题目/摘要把预印本归入 A–E 一个或多个领域；`preprint` 只记录同行评议状态。
+3. 预印本转正式发表必须产生 `publication_transition` 事件，即使 title_norm/DOI 命中，也不能被静默去重。
+4. Europe PMC 可能直接提供 published-version linkage；宿主应优先利用明确 linkage，title_norm 只作回退机制。
 
-两条处理规则：
+---
 
-1. 预印本按 `references/scoring-rubric.md` 的降级规则**扣 1 分**（未同行评议），且默认归入 track A。
-2. **预印本转正式发表**由 `title_norm` 去重自动捕捉——同一研究不会在预印本阶段和发表阶段各报一次。
-   这正是四级去重里要有规范化标题这一级的原因。
+## PubMed 抓取完整性
+
+- ESearch 必须分页取全，禁止固定 `retmax=400` 后截断。
+- 单查询结果若超过 PubMed 可安全获取上限，应拆分日期窗口。
+- 对候选 PMID 必须至少 EFetch abstract；ESummary 元数据不足以支持证据评级。
+- 拟进入正文的研究，如有合法全文，进一步阅读全文并记录 `evidence_basis=full_text`；否则写 `abstract_only`。
