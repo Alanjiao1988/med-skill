@@ -1,6 +1,24 @@
 # 回归与审计清单
 
-本目录用于验证 med-skill 的关键不变量。修改检索式、评分量表、state schema 或 brief template 后，应使用固定候选夹具重新跑证据解释，并比较结构和结论变化。
+本目录用于验证 med-skill 的关键不变量。修改检索式、评分量表、state schema 或 brief template 后，应先运行本地 invariant tests，再使用固定候选夹具重新跑证据解释，并比较结构和结论变化。
+
+## 快速本地测试
+
+```bash
+python -m unittest discover -s tests -p "test_*.py" -v
+```
+
+`tests/test_invariants.py` 当前锁定以下关键行为：
+
+- Unicode 标题规范化不破坏中文/非拉丁字符
+- trial protocol 更新不会被伪装成 status change
+- results posted 的事件优先级
+- formal baseline 拒绝 `PPR:` 预印本来源
+- candidate 缺 decision 时 state commit fail closed
+- preprint 不能用 `verdict=material`
+- 合法 peer-reviewed / preprint-watchlist decision 可通过验证
+
+这些测试不联网。
 
 ## 建立候选夹具
 
