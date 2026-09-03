@@ -5,7 +5,7 @@ description: 儿童肾病综合征与微小病变肾病（MCD）living evidence 
 
 # 儿童 MCD / 肾病综合征月度证据监测
 
-版本：0.4.0
+版本：0.5.0
 
 > 研究与证据监测用途，不构成医疗建议，不替代临床诊疗。
 
@@ -39,8 +39,11 @@ F. 临床试验注册与状态变化（clinical trials）
 | 患者画像（可选、私有） | `patient-profile.md` | `patient_relevance = N/A` |
 | 投递配置 | 宿主运行时 `config.recipient` | 不发送邮件，只返回 `delivery_pending` |
 | 检索窗口 | 宿主传入或 state 推导 | `state.window_end_edat - 15d` 到 today |
+| 报告归档仓库 | `MED_REPORT_REPO` / `--report-repo` | 默认 `Alanjiao1988/Med-report` |
 
 `patient-profile.md` 属于健康隐私，已在 `.gitignore` 中排除，不得提交到仓库。
+运行环境需要 Python 3.10+ 和已认证的 GitHub CLI `gh`；不得把 GitHub token
+写入仓库或报告。
 
 ## 核心工作流
 
@@ -53,8 +56,9 @@ F. 临床试验注册与状态变化（clinical trials）
 7. **三维独立评级**：evidence strength（S）、novelty（N）、patient relevance（R）按 `references/scoring-rubric.md` 执行，不合成总分。
 8. **与 baseline 比较**：区分 confirmatory、extends、challenges、paradigm-shift candidate、guideline change。
 9. **生成简报**：严格使用 `templates/brief-template.md`。先完成技术层，再按 `references/caregiver-layer.md` 生成家长层（三句话、门诊问题、当前用药安全信息）。家长层从技术层推导，不得引入技术层没有的结论。
-10. **两阶段提交 state**：抓取阶段只生成 candidate artifact；宿主完成证据解读和简报后生成 decisions artifact；只有 `brief_generated=true` 且 `run_id` 匹配时才允许 `--commit-state`。提交阶段不得重新联网抓取。
-11. **投递**：若宿主具有邮件/消息工具且提供 `config.recipient`，发送生成后的简报；否则返回简报并标记 `delivery_pending=true`。
+10. **校验简报与 decisions**：简报必须位于 `out/`、带精确 run/period 标记和医疗免责；decisions 必须满足 schema v3、评分范围、material 门槛和来源限制。
+11. **私有归档后提交 state**：`--commit-state` 先把简报归档到 private GitHub 仓库，再以文件锁和原子写入更新 state。归档失败、旧窗口、重复冲突或 schema 不合法均不得前移 state。
+12. **投递**：若宿主具有邮件/消息工具且提供 `config.recipient`，发送生成后的简报；否则返回简报并标记 `delivery_pending=true`。
 
 ## Bootstrap 模式
 
@@ -78,6 +82,8 @@ F. 临床试验注册与状态变化（clinical trials）
 14. **不提供症状阈值或就医指征。** 这些必须来自患儿医疗团队；技能只提示家长向团队索取属于自己孩子的书面行动计划。
 15. 检出国际指南变化时不得据此暗示国内当前做法有问题；写成可与主诊医师讨论的问题，并考虑药物可及性、适应证批准、医保覆盖与国内指南差异。
 16. 书籍/教材类记录（StatPearls、GeneReviews 等 `peer_review_status=book_chapter`）属于三级教育性内容，可用于背景理解，**不得作为 material 证据**支撑 claim 变化。
+17. 报告可能含健康相关个体化描述，只允许归档到 private GitHub 仓库；目标仓库不是 private 时必须失败。
+18. `run_id`、检索窗口和 query version 必须保持幂等、单调；不得用旧 artifact 回滚 state。
 
 ## 数据源与可靠性层级
 
@@ -148,7 +154,11 @@ CTRI、jRCT、ChiCTR 等单独注册库尚未在本仓库实现稳定程序化�
   "material_count": 0,
   "appendix_count": 0,
   "delivery_pending": false,
-  "state_written": true
+  "state_written": true,
+  "report_archive": {
+    "repository": "Alanjiao1988/Med-report",
+    "path": "reports/YYYY/YYYY-MM/brief-YYYY-MM-RUN_ID.md"
+  }
 }
 ```
 

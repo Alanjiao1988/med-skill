@@ -14,7 +14,7 @@ peer_review_status: peer_reviewed | preprint | guideline | registry | book_chapt
 evidence_basis: full_text | abstract_only | registry_record | guideline_full_text
 ```
 
-`book_chapter` 用于 PubMed 中的 NCBI Bookshelf 条目（StatPearls、GeneReviews 等）。这些是**三级教育性内容**，不是原始研究：可用于背景理解和术语核对，但**不得作为 material 证据**支撑任何 claim 变化，也不得进入 baseline。其 novelty 通常为 1（内容更新≠新证据）。
+`book_chapter` 用于 PubMed 中的 NCBI Bookshelf 条目（StatPearls、GeneReviews 等）。这些是**三级教育性内容**，不是原始研究：可用于背景理解和术语核对，但**不得作为 material 证据**支撑任何 claim 变化，也不得进入 baseline。decision 固定使用 S1/N1（内容更新≠新证据）。
 
 `S/N/R` 不替代 GRADE，也不应伪装成标准化临床指南证据等级。
 
