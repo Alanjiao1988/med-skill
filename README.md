@@ -63,6 +63,49 @@ tests/
   README.md                           回归验证说明
 ```
 
+## 安装到其他机器 / 其他 Agent
+
+仓库根目录本身就是 skill（`SKILL.md` 在根目录），因此安装 = 把仓库内容放进 agent 的 skills 目录，目录名必须与 `SKILL.md` 里的 `name` 一致（`med-skill`）。
+
+Claude Code（用户级，对所有项目生效）：
+
+```bash
+git clone https://github.com/Alanjiao1988/med-skill.git ~/.claude/skills/med-skill
+```
+
+Claude Code（项目级，仅当前项目）：
+
+```bash
+git clone https://github.com/Alanjiao1988/med-skill.git .claude/skills/med-skill
+```
+
+Windows PowerShell：
+
+```powershell
+git clone https://github.com/Alanjiao1988/med-skill.git "$env:USERPROFILE\.claude\skills\med-skill"
+```
+
+后续更新：
+
+```bash
+git -C ~/.claude/skills/med-skill pull
+```
+
+### 新机器上的首次使用
+
+`state/seen.json` 和 `patient-profile.md` 都不进仓库，所以新装的实例：
+
+1. 没有 state → 首次运行自动进入 **bootstrap 模式**，回溯 24 个月建立基线；
+2. 没有患儿画像 → 简报中 `patient relevance` 全部记为 `N/A`，家长层第 2 句会写明"未配置患儿画像"。
+
+要启用个体相关性判断，复制模板并填写（该文件含健康隐私，已被 gitignore，**不要提交**）：
+
+```bash
+cp templates/patient-profile.example.md patient-profile.md
+```
+
+如果希望多台机器共享已读记录，需要自行同步 `state/seen.json`；否则每台机器各自维护独立基线。
+
 ## 运行流程
 
 ### 1. 首次建立 24 个月 baseline 候选集
