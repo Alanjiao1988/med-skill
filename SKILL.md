@@ -1,17 +1,24 @@
 ---
 name: med-skill
-description: 儿童肾病综合征与微小病变肾病（MCD）living evidence surveillance。用于按月检索、核验和总结 SSNS/FRNS/SDNS/MCD 的机制、治疗、生物标志物、自然史与安全性、指南共识和临床试验进展，并生成简体中文增量证据简报。涉及 rituximab、MMF、CNI、抗 nephrin、足细胞机制、复发风险、儿童肾病指南、trial registry 更新或 monthly evidence brief 时使用。
+description: 儿童肾病综合征与微小病变肾病（MCD）living evidence surveillance，面向患儿家长。用于按月检索、核验和总结 SSNS/FRNS/SDNS/MCD 的机制、治疗、生物标志物、自然史与安全性、指南共识和临床试验进展，生成简体中文增量证据简报，并把证据转成可带去门诊与主诊医师讨论的问题。涉及 rituximab、MMF、CNI、抗 nephrin、足细胞机制、复发风险、儿童肾病最新进展、儿童肾病指南、trial registry 更新、monthly evidence brief，或家长想了解孩子肾病的最新研究进展时使用。不提供诊断、用药或剂量建议。
 ---
 
 # 儿童 MCD / 肾病综合征月度证据监测
 
-版本：0.3.0
+版本：0.4.0
 
 > 研究与证据监测用途，不构成医疗建议，不替代临床诊疗。
 
 ## 核心目标
 
 每月运行一次 living evidence surveillance，聚焦儿童微小病变肾病（MCD）及临床重叠表型（SSNS、FRNS、SDNS）。输出的是相对既有证据基线的 **delta brief**，不是每月重写一份泛化综述。
+
+**使用者是患儿家长，不是研究者。** 因此简报同时包含两层：
+
+- **技术层**：S/N/R 评级、claim_type、population_directness、证据基础，保证判断可核验；
+- **家长层**：把技术层翻译成"本月是否有需要注意的事"和"下次门诊可以问医生什么"，规则见 `references/caregiver-layer.md`。
+
+家长层不降低证据标准，也不替代技术层。**绝大多数月份，家长层的正确结论是"本月没有需要改变任何事的证据"**——这是合格输出，不是失败。
 
 ## 六个证据领域
 
@@ -45,7 +52,7 @@ F. 临床试验注册与状态变化（clinical trials）
 6. **必要时升级到全文**：任何拟进入正文的 material study，如存在合法可访问全文（PMC / Europe PMC / publisher OA），应优先阅读全文。若只能读 abstract，必须标记 `evidence_basis=abstract_only`，不得声称摘要未提供的剂量、亚组、统计方法或安全性细节。
 7. **三维独立评级**：evidence strength（S）、novelty（N）、patient relevance（R）按 `references/scoring-rubric.md` 执行，不合成总分。
 8. **与 baseline 比较**：区分 confirmatory、extends、challenges、paradigm-shift candidate、guideline change。
-9. **生成简报**：严格使用 `templates/brief-template.md`。
+9. **生成简报**：严格使用 `templates/brief-template.md`。先完成技术层，再按 `references/caregiver-layer.md` 生成家长层（三句话、门诊问题、当前用药安全信息）。家长层从技术层推导，不得引入技术层没有的结论。
 10. **两阶段提交 state**：抓取阶段只生成 candidate artifact；宿主完成证据解读和简报后生成 decisions artifact；只有 `brief_generated=true` 且 `run_id` 匹配时才允许 `--commit-state`。提交阶段不得重新联网抓取。
 11. **投递**：若宿主具有邮件/消息工具且提供 `config.recipient`，发送生成后的简报；否则返回简报并标记 `delivery_pending=true`。
 
@@ -66,6 +73,11 @@ F. 临床试验注册与状态变化（clinical trials）
 9. 指南网页有更新不等于 novelty=3；只有实质性推荐、证据等级或适用人群变化才能视为重要 guideline change。
 10. 不做个体化治疗决策，只提出可与主诊医师讨论的问题。
 11. 每期简报必须披露检索覆盖、失败源、全文/摘要证据基础和已知缺口。
+12. **家长层禁止输出**：具体药物/剂量/疗程/减量停药方案、换药加药倾向、对当前治疗方案是否恰当的评价、化验值解读、预后判断、诊断意见、绕过主诊医师的行动建议。用户直接要求时也不例外——改为转成一条可带去门诊的问题。
+13. **不得为了让简报"有内容"而抬高弱证据的呈现权重。** 无实质进展时必须直说本月无需改变任何事。
+14. **不提供症状阈值或就医指征。** 这些必须来自患儿医疗团队；技能只提示家长向团队索取属于自己孩子的书面行动计划。
+15. 检出国际指南变化时不得据此暗示国内当前做法有问题；写成可与主诊医师讨论的问题，并考虑药物可及性、适应证批准、医保覆盖与国内指南差异。
+16. 书籍/教材类记录（StatPearls、GeneReviews 等 `peer_review_status=book_chapter`）属于三级教育性内容，可用于背景理解，**不得作为 material 证据**支撑 claim 变化。
 
 ## 数据源与可靠性层级
 
@@ -105,6 +117,7 @@ CTRI、jRCT、ChiCTR 等单独注册库尚未在本仓库实现稳定程序化�
 | `references/search-queries.md` | A–F 固化检索式、注册库与预印本来源规则 |
 | `references/scoring-rubric.md` | claim-specific S/N/R 评级与分诊 |
 | `references/state-schema.md` | candidate/decision/state 两阶段 schema 与去重规则 |
+| `references/caregiver-layer.md` | 家长层写法、门诊问题规则与硬边界 |
 | `templates/brief-template.md` | 月度简报格式 |
 | `templates/patient-profile.example.md` | 私有患者画像模板 |
 | `templates/decisions.example.json` | state commit 所需的 decisions artifact 示例 |

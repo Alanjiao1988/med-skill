@@ -138,5 +138,78 @@ class MedSkillInvariantTests(unittest.TestCase):
         fe.validate_decisions(candidates, decisions)
 
 
+class RegistryPrecisionTests(unittest.TestCase):
+    """Registry APIs match whole records, so hits need a topical re-check."""
+
+    def test_offtopic_registry_records_are_rejected(self):
+        for text in (
+            "Study of etoposide carboplatin pembrolizumab | High-grade neuroendocrine tumours Cancer",
+            "ESTEEM testosterone quality of life | Hypogonadism",
+            "Calcium dobesilate in diabetic nephropathy | Diabetic nephropathy",
+            "MINIMA Stem With DELTA TT or DELTA ST-C Study | Hip osteoarthritis",
+        ):
+            self.assertFalse(fe.is_on_topic(text), text)
+
+    def test_ontopic_records_are_kept(self):
+        for text in (
+            "Rituximab in nephrotic glomerulonephritis | Nephrotic syndrome, caused by minimal change disease",
+            "Atacicept in Multiple Autoimmune Glomerular Diseases | Multiple Autoimmune Glomerular Diseases",
+            "Zuberitamab in the First Episode of Paediatric Nephrotic Syndrome | nephrotic syndrome",
+        ):
+            self.assertTrue(fe.is_on_topic(text), text)
+
+    def test_ctgov_condition_phrases_are_quoted(self):
+        import inspect
+
+        src = inspect.getsource(fe.fetch_trials)
+        self.assertIn('"minimal change disease"', src)
+        self.assertNotIn("(nephrotic syndrome OR minimal change disease", src)
+
+
+class BookRecordTests(unittest.TestCase):
+    """PubMed returns Bookshelf records that used to abort the whole run."""
+
+    BOOK_XML = """<?xml version='1.0'?>
+    <PubmedArticleSet><PubmedBookArticle><BookDocument>
+      <PMID Version="1">32809474</PMID>
+      <ArticleIdList><ArticleId IdType="bookaccession">NBK560639</ArticleId></ArticleIdList>
+      <Book><Publisher><PublisherName>StatPearls Publishing</PublisherName></Publisher>
+        <BookTitle book="statpearls">StatPearls</BookTitle>
+        <PubDate><Year>2026</Year><Month>01</Month></PubDate></Book>
+      <ArticleTitle book="statpearls">Minimal Change Disease</ArticleTitle>
+      <Language>eng</Language>
+      <AuthorList><Author><LastName>Zamora</LastName><Initials>G</Initials></Author></AuthorList>
+      <PublicationType>Study Guide</PublicationType>
+      <Abstract><AbstractText>Minimal change disease is a cause of nephrotic syndrome.</AbstractText></Abstract>
+    </BookDocument></PubmedBookArticle></PubmedArticleSet>"""
+
+    def test_book_record_parses(self):
+        import xml.etree.ElementTree as ET
+
+        root = ET.fromstring(self.BOOK_XML)
+        rec = fe.parse_pubmed_book(root.find("PubmedBookArticle"))
+        self.assertIsNotNone(rec)
+        self.assertEqual(rec["pmid"], "32809474")
+        self.assertEqual(rec["title"], "Minimal Change Disease")
+        self.assertIn("nephrotic syndrome", rec["abstract"])
+        self.assertEqual(rec["full_text_url"], "https://www.ncbi.nlm.nih.gov/books/NBK560639/")
+
+    def test_book_record_is_not_peer_reviewed_research(self):
+        import xml.etree.ElementTree as ET
+
+        root = ET.fromstring(self.BOOK_XML)
+        rec = fe.parse_pubmed_book(root.find("PubmedBookArticle"))
+        # Tertiary educational content must stay distinguishable from原始研究.
+        self.assertEqual(rec["peer_review_status"], "book_chapter")
+        self.assertNotEqual(rec["peer_review_status"], "peer_reviewed")
+
+
+class NCBIIdentityTests(unittest.TestCase):
+    def test_eutils_params_carry_tool_identity(self):
+        p = fe.eutils_params(db="pubmed", term="x")
+        self.assertEqual(p["db"], "pubmed")
+        self.assertTrue(p["tool"])
+
+
 if __name__ == "__main__":
     unittest.main()

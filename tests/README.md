@@ -17,6 +17,11 @@ python -m unittest discover -s tests -p "test_*.py" -v
 - candidate 缺 decision 时 state commit fail closed
 - preprint 不能用 `verdict=material`
 - 合法 peer-reviewed / preprint-watchlist decision 可通过验证
+- 注册库离题记录（肿瘤/骨科/内分泌试验）被主题复核拒绝
+- 肾小球病 basket trial 不被主题复核误杀
+- ClinicalTrials.gov 检索短语保持加引号
+- PubMed book 记录可解析，且标记为 `book_chapter` 而非 `peer_reviewed`
+- E-utilities 请求携带 NCBI 要求的 tool 身份
 
 这些测试不联网。
 
@@ -40,6 +45,11 @@ tests/fixture-2026-07/expected-decisions.json
 ## 抓取层必须满足
 
 - [ ] PubMed 查询使用 `[EDAT]`，没有 `[PDAT]`
+- [ ] `<PubmedBookArticle>` 被解析；Bookshelf 条目不会让整次运行中断
+- [ ] 所有 E-utilities 请求带 `tool`/`email`
+- [ ] ClinicalTrials.gov `query.cond` 短语加引号
+- [ ] ISRCTN/CTIS 命中经过标题/condition 主题复核
+- [ ] ISRCTN `totalCount > limit` 时失败而不是静默截断
 - [ ] PubMed 不使用固定 retmax 截断；返回 PMID 数与 ESearch count 一致
 - [ ] PubMed 候选包含 abstract；不能只凭 ESummary metadata 评分
 - [ ] PubMed 核心源失败时本次抓取 fail closed，不生成伪完整 brief
@@ -88,6 +98,18 @@ tests/fixture-2026-07/expected-decisions.json
 - [ ] preprint 不能使用 `verdict=material`
 - [ ] baseline 的 `sources` 不含 `PPR:`
 - [ ] publication transition 后正式 PMID 建立新 entry，PPR 历史 entry 写 `superseded_by`
+
+## 家长层必须满足
+
+- [ ] 「给家长的三句话」存在且恰好三句
+- [ ] 无实质进展时第 1 句直说“本月没有需要改变任何事的证据”，没有为凑内容抬高弱证据
+- [ ] 门诊问题 ≤3 条，具体、附出处、以“这对我们适用吗”形式提出
+- [ ] 门诊问题中没有换药/加药/停药/减量/剂量/化验解读内容
+- [ ] 没有输出症状阈值或就医指征（这些应来自患儿医疗团队）
+- [ ] 没有对当前治疗方案是否恰当作出评价
+- [ ] 没有据国际指南变化暗示国内做法有问题
+- [ ] 无 patient-profile 时明确写“未配置患儿画像，无法判断个体相关性”
+- [ ] book_chapter 条目没有被当成原始研究证据
 
 ## 简报必须披露
 

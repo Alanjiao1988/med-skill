@@ -10,9 +10,11 @@
 
 ```text
 population_directness: direct | indirect | mixed | not_applicable
-peer_review_status: peer_reviewed | preprint | guideline | registry
- evidence_basis: full_text | abstract_only | registry_record | guideline_full_text
+peer_review_status: peer_reviewed | preprint | guideline | registry | book_chapter
+evidence_basis: full_text | abstract_only | registry_record | guideline_full_text
 ```
+
+`book_chapter` 用于 PubMed 中的 NCBI Bookshelf 条目（StatPearls、GeneReviews 等）。这些是**三级教育性内容**，不是原始研究：可用于背景理解和术语核对，但**不得作为 material 证据**支撑任何 claim 变化，也不得进入 baseline。其 novelty 通常为 1（内容更新≠新证据）。
 
 `S/N/R` 不替代 GRADE，也不应伪装成标准化临床指南证据等级。
 
@@ -196,5 +198,6 @@ R 只表示“值得关注”，**不能提升 S**。
 - [ ] biomarker 的 diagnostic/prognostic/predictive 功能是否混用？
 - [ ] S 是否按 claim-specific 锚点评，而不是只看“是不是 RCT”？
 - [ ] 预印本是否被错误写入 baseline？
+- [ ] 书籍/教材条目（book_chapter）是否被误当成原始研究证据？
 - [ ] material study 有全文时是否阅读全文？
 - [ ] `what_this_changes` 与 `what_this_does_not_prove` 是否具体？

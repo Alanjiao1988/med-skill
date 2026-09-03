@@ -45,12 +45,26 @@ EPMC = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 ISRCTN_NS = "{http://www.67bricks.com/isrctn}"
 
 API_KEY = os.environ.get("NCBI_API_KEY", "")
+NCBI_TOOL = os.environ.get("NCBI_TOOL", "med-skill")
+NCBI_EMAIL = os.environ.get("NCBI_EMAIL", "")
 SLEEP = 0.11 if API_KEY else 0.34
 WINDOW_OVERLAP_DAYS = 15
 MAX_PUBMED_ESEARCH = 10000
 UA = "med-skill-evidence-surveillance/0.3"
 KEY_PREFIX = {"CTGOV": "NCT:", "ISRCTN": "ISRCTN:", "CTIS": "CTIS:"}
 VALID_VERDICTS = {"material", "appendix", "preprint_watchlist", "discarded"}
+NEWLINE = chr(10)
+
+
+def eutils_params(**kw):
+    """Every E-utilities call must carry tool/email identity per NCBI policy."""
+    p = dict(kw)
+    p["tool"] = NCBI_TOOL
+    if NCBI_EMAIL:
+        p["email"] = NCBI_EMAIL
+    if API_KEY:
+        p["api_key"] = API_KEY
+    return p
 
 
 def request_bytes(req, retries=4, timeout=90):
@@ -166,9 +180,7 @@ def build_term(raw, frag, start, end):
 # ---------------- PubMed ----------------
 
 def esearch_all(term, page_size=500):
-    base = {"db": "pubmed", "term": term, "retmode": "json"}
-    if API_KEY:
-        base["api_key"] = API_KEY
+    base = eutils_params(db="pubmed", term=term, retmode="json")
 
     first = dict(base, retmax="0")
     data = http_json(EUTILS + "/esearch.fcgi?" + urllib.parse.urlencode(first))
@@ -188,7 +200,13 @@ def esearch_all(term, page_size=500):
 
     if len(ids) != count:
         raise RuntimeError(f"PubMed pagination incomplete: expected {count}, got {len(ids)}")
-    return ids
+    unique = list(dict.fromkeys(ids))
+    if len(unique) != count:
+        # Paging without the history server can repeat records while the index shifts.
+        raise RuntimeError(
+            f"PubMed pagination returned duplicates: {count} expected, {len(unique)} unique"
+        )
+    return unique
 
 
 def parse_pubmed_article(pa):
@@ -257,13 +275,89 @@ def parse_pubmed_article(pa):
     }
 
 
+def parse_pubmed_book(pba):
+    """Parse <PubmedBookArticle> (StatPearls, GeneReviews, NCBI Bookshelf).
+
+    These are indexed in PubMed and are routinely returned by the A-E queries,
+    but they use BookDocument rather than MedlineCitation/Article. Skipping them
+    used to abort the whole run through the EFetch completeness check.
+    """
+    doc = pba.find("BookDocument")
+    if doc is None:
+        return None
+
+    pmid = text_of(doc.find("PMID"))
+    if not pmid:
+        return None
+
+    abstract_parts = []
+    for x in doc.findall("./Abstract/AbstractText"):
+        txt = text_of(x)
+        if not txt:
+            continue
+        label = (x.attrib.get("Label") or x.attrib.get("NlmCategory") or "").strip()
+        abstract_parts.append((label + ": " if label else "") + txt)
+
+    book = doc.find("Book")
+    book_title = text_of(book.find("BookTitle")) if book is not None else ""
+    publisher = ""
+    pubdate = ""
+    if book is not None:
+        publisher = text_of(book.find("./Publisher/PublisherName"))
+        pd = book.find("PubDate")
+        if pd is not None:
+            pubdate = " ".join(
+                t for t in (text_of(pd.find("Year")), text_of(pd.find("Month"))) if t
+            )
+
+    doi = ""
+    accession = ""
+    for aid in list(doc.findall("./ArticleIdList/ArticleId")) + list(
+        pba.findall("./PubmedBookData/ArticleIdList/ArticleId")
+    ):
+        kind = (aid.attrib.get("IdType") or "").lower()
+        if kind == "doi":
+            doi = norm_doi(text_of(aid))
+        elif kind == "bookaccession":
+            accession = text_of(aid)
+
+    authors = []
+    for au in doc.findall("./AuthorList/Author"):
+        collective = text_of(au.find("CollectiveName"))
+        if collective:
+            authors.append(collective)
+            continue
+        name = (text_of(au.find("LastName")) + " " + text_of(au.find("Initials"))).strip()
+        if name:
+            authors.append(name)
+
+    pubtypes = [text_of(x) for x in doc.findall("./PublicationType") if text_of(x)]
+    pubtypes += [text_of(x) for x in doc.findall("./PublicationTypeList/PublicationType") if text_of(x)]
+
+    return {
+        "pmid": pmid,
+        "doi": doi,
+        "pmcid": "",
+        "title": text_of(doc.find("ArticleTitle")),
+        "journal": " / ".join(x for x in (book_title, publisher) if x),
+        "pubdate": pubdate,
+        "abstract": NEWLINE.join(abstract_parts),
+        "language": [text_of(x) for x in doc.findall("./Language") if text_of(x)],
+        "pubtypes": sorted(set(pubtypes)) or ["Book Chapter"],
+        "authors": authors[:8],
+        "url": "https://pubmed.ncbi.nlm.nih.gov/" + pmid + "/",
+        "full_text_url": ("https://www.ncbi.nlm.nih.gov/books/" + accession + "/") if accession else "",
+        "peer_review_status": "book_chapter",
+        "record_type": "book",
+        "retrieval_depth": "abstract",
+    }
+
+
 def efetch_pubmed(pmids, chunk_size=100):
     out = {}
     for i in range(0, len(pmids), chunk_size):
         chunk = pmids[i:i + chunk_size]
-        p = {"db": "pubmed", "id": ",".join(chunk), "retmode": "xml"}
-        if API_KEY:
-            p["api_key"] = API_KEY
+        p = eutils_params(db="pubmed", id=",".join(chunk), retmode="xml")
         req = urllib.request.Request(
             EUTILS + "/efetch.fcgi?" + urllib.parse.urlencode(p),
             headers={"User-Agent": UA},
@@ -275,6 +369,10 @@ def efetch_pubmed(pmids, chunk_size=100):
             rec = parse_pubmed_article(pa)
             if rec and rec["pmid"]:
                 out[rec["pmid"]] = rec
+        for pba in root.findall("PubmedBookArticle"):
+            rec = parse_pubmed_book(pba)
+            if rec and rec["pmid"]:
+                out.setdefault(rec["pmid"], rec)
     missing = sorted(set(pmids) - set(out))
     if missing:
         raise RuntimeError("PubMed EFetch missing PMID(s): " + ",".join(missing[:10]))
@@ -337,8 +435,9 @@ def fetch_trials(start, end):
     studies, token = [], None
     date_range = "AREA[LastUpdatePostDate]RANGE[{:%Y-%m-%d},{:%Y-%m-%d}]".format(start, end)
     condition_query = (
-        "(nephrotic syndrome OR minimal change disease OR steroid sensitive nephrotic syndrome "
-        "OR steroid dependent nephrotic syndrome OR frequently relapsing nephrotic syndrome)"
+        '("nephrotic syndrome" OR "minimal change disease" OR "minimal change nephropathy" '
+        'OR "steroid sensitive nephrotic syndrome" OR "steroid dependent nephrotic syndrome" '
+        'OR "frequently relapsing nephrotic syndrome")'
     )
     while True:
         p = {
@@ -368,10 +467,49 @@ def _isrctn_text(node, path):
     return (el.text or "").strip() if el is not None else ""
 
 
+# Core disease phrases plus the glomerular-disease umbrella terms registries use
+# for basket trials. Wide enough to keep podocytopathy/glomerular trials, narrow
+# enough to reject records that merely mention nephrotic syndrome in passing.
+DISEASE_PHRASES = (
+    "nephrotic syndrome",
+    "minimal change disease",
+    "minimal change nephropathy",
+    "minimal change nephrotic",
+    "lipoid nephrosis",
+    "glomerular disease",
+    "glomerular kidney disease",
+    "glomerulonephritis",
+    "glomerulopathy",
+    "podocytopathy",
+    "focal segmental glomerulosclerosis",
+    "fsgs",
+)
+
+
+def is_on_topic(text):
+    """True when a disease phrase appears in a registry record's topical fields.
+
+    ISRCTN's `q` matches the whole record, so trials that merely mention
+    nephrotic syndrome in a plain-English summary or exclusion criterion come
+    back as hits. Precision is recovered by re-checking title/condition only.
+    """
+    low = (text or "").lower()
+    return any(phrase in low for phrase in DISEASE_PHRASES)
+
+
 def fetch_isrctn(start, end):
     query = '"nephrotic syndrome" OR "minimal change disease"'
-    xml = http_text(ISRCTN + "?" + urllib.parse.urlencode({"q": query, "limit": 500}))
+    limit = 500
+    xml = http_text(ISRCTN + "?" + urllib.parse.urlencode({"q": query, "limit": limit}))
     root = ET.fromstring(xml)
+
+    total = int(root.attrib.get("totalCount") or 0)
+    if total > limit:
+        # The repo forbids silent truncation; surface it as a source error instead.
+        raise RuntimeError(
+            f"ISRCTN returned {total} trials but limit is {limit}; raise the limit or page the query"
+        )
+
     out = []
     for full in root.findall(ISRCTN_NS + "fullTrial"):
         tr = full.find(ISRCTN_NS + "trial")
@@ -379,6 +517,15 @@ def fetch_isrctn(start, end):
             continue
         updated = parse_date_loose(tr.attrib.get("lastUpdated", ""))
         if not updated or not (start <= updated <= end):
+            continue
+
+        cond = tr.find(ISRCTN_NS + "conditions")
+        topical = " | ".join([
+            _isrctn_text(tr.find(ISRCTN_NS + "trialDescription"), "title"),
+            _isrctn_text(tr.find(ISRCTN_NS + "trialDescription"), "scientificTitle"),
+            " ".join(text_of(x) for x in cond.iter()) if cond is not None else "",
+        ])
+        if not is_on_topic(topical):
             continue
 
         desc = tr.find(ISRCTN_NS + "trialDescription")
@@ -431,6 +578,8 @@ def fetch_ctis(start, end):
             if not updated or not (start <= updated <= end):
                 continue
             ct = r.get("ctNumber", "")
+            if not is_on_topic(str(r.get("ctTitle", "")) + " | " + str(r.get("conditions", ""))):
+                continue
             results_received = str(r.get("resultsFirstReceived", "")).strip().lower()
             has_results = True if results_received == "yes" else (False if results_received == "no" else None)
             protocol_subset = {
@@ -713,6 +862,7 @@ def fetch_phase(args):
         "queries_version": qver,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "core_sources_complete": True,
+        "supplemental_sources_complete": not source_errors,
         "source_errors": source_errors,
         "known_gaps": [
             {"source": "WHO ICTRP", "status": "available_but_not_integrated"},

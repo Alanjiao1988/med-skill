@@ -2,6 +2,10 @@
 
 一个可移植的 Agent Skill：按月监测儿童肾病综合征 / 微小病变肾病（MCD）相关证据，重点覆盖 SSNS、FRNS、SDNS，并生成简体中文 living evidence delta brief。
 
+**使用者是患儿家长。** 简报分两层：技术层保证证据可核验（S/N/R、claim_type、人群直接性），家长层把它翻译成"本月是否需要注意"和"下次门诊可以问医生什么"。家长层不降低证据标准，规则见 `references/caregiver-layer.md`。
+
+> 本项目不提供诊断、用药、剂量或就医指征建议。它把文献变成能带去门诊的问题，决策仍由主诊医师做出。
+
 ## 目标
 
 每月回答三个问题：
@@ -9,6 +13,8 @@
 1. 本期真正出现了什么新的学术/临床证据？
 2. 这些证据相对既有 baseline 是确认、扩展、挑战还是可能改变实践？
 3. 哪些证据与儿童 MCD/SSNS/FRNS/SDNS 的真实临床问题最相关？
+
+并给家长三个可用的答案：本月结论是什么、和我孩子有没有关系、我需要做什么（绝大多数月份是"什么都不用改"）。
 
 宿主应用负责调度和最终投递；仓库本身不绑定 Gmail、Outlook 或 SMTP，也不硬编码个人邮箱。
 
@@ -44,6 +50,7 @@ references/
   search-queries.md                   A–F 固化检索策略、注册库/预印本来源规则
   scoring-rubric.md                   claim-specific S/N/R 评级与分诊
   state-schema.md                     candidate→decision→state 两阶段状态协议
+  caregiver-layer.md                  家长层写法、门诊问题规则与硬边界
 templates/
   brief-template.md                   月度简报模板
   patient-profile.example.md          私有患者画像模板
@@ -160,12 +167,35 @@ out/
 当前：
 
 ```text
-Skill: 0.3.0
+Skill: 0.4.0
 queries_version: 2
 state schema_version: 2
 ```
 
+## 0.4.0 变更
+
+修复了四个经实测确认的抓取层缺陷：
+
+| 问题 | 影响 | 修复 |
+|---|---|---|
+| PubMed `<PubmedBookArticle>` 未解析 | 命中任一 StatPearls/Bookshelf 条目即抛 `EFetch missing PMID`，**整月运行中断** | 新增 book 记录解析，标记 `peer_review_status=book_chapter` |
+| ClinicalTrials.gov `query.cond` 短语未加引号 | Essie 松散匹配，髋关节假体试验被当成 MCD 命中 | 短语加引号；实测噪声消失且相关试验无损失 |
+| ISRCTN / CTIS 全记录匹配 | 睾酮、卡铂化疗、糖尿病肾病试验混入 Track F | 增加标题/condition 字段主题复核，含肾小球病伞形术语以避免误杀 basket trial |
+| ISRCTN `limit=500` 无截断检查 | 结果超限时静默丢失，违反仓库自身"禁止静默截断"约束 | 校验 `totalCount`，超限直接失败 |
+
+另：所有 E-utilities 请求补上 NCBI 要求的 `tool`/`email` 参数（`NCBI_TOOL` / `NCBI_EMAIL`）；ESearch 分页增加重复记录检测；新增家长层。
+
+实测（窗口 2026-08-01 ~ 2026-08-20）：试验命中从 12 条降到 8 条，剔除的 5 条均为噪声，恢复 1 条被误杀的相关试验。
+
 从旧 v0.2 state 升级时，首次运行可能把旧 trial `status_hash` 视为需要重新建立 `protocol_hash` 的 `protocol_record_updated`；这属于一次性 migration，不应误写成真实临床状态改变。
+
+## 环境变量
+
+```bash
+export NCBI_EMAIL='you@example.com'   # NCBI 要求提供联系方式
+export NCBI_TOOL='med-skill'
+export NCBI_API_KEY='...'             # 可选，提高 E-utilities 速率上限
+```
 
 ## 宿主投递
 

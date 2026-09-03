@@ -118,12 +118,14 @@ AND {WINDOW}
 
 ```text
 GET https://clinicaltrials.gov/api/v2/studies
-  ?query.cond=(nephrotic syndrome OR minimal change disease OR steroid sensitive nephrotic syndrome OR steroid dependent nephrotic syndrome)
+  ?query.cond=("nephrotic syndrome" OR "minimal change disease" OR "minimal change nephropathy" OR "steroid sensitive nephrotic syndrome" OR "steroid dependent nephrotic syndrome" OR "frequently relapsing nephrotic syndrome")
   &filter.advanced=AREA[LastUpdatePostDate]RANGE[YYYY-MM-DD,YYYY-MM-DD]
   &pageSize=200
   &countTotal=true
   &format=json
 ```
+
+**短语必须加引号。** 不加引号时 Essie 按词元松散匹配，实测会把 `MINIMA Stem With DELTA TT`（髋关节柄假体试验）当成 `minimal change disease` 命中。加引号后该噪声消失，且相关试验无损失。
 
 最少记录：注册号、标题、overallStatus、phase、年龄、hasResults、lastUpdatePostDate、primary completion、enrollment。
 
@@ -138,6 +140,23 @@ GET https://www.isrctn.com/api/query/format/default
 ```
 
 ISRCTN 官方 API 支持 Boolean query。当前实现客户端按 `trial/@lastUpdated` 做窗口过滤。
+
+### 注册库命中的主题复核（必需）
+
+ISRCTN 的 `q` 与 CTIS 的 `containAll` 都是**全记录匹配**：只要"nephrotic syndrome"出现在通俗摘要、排除标准或不良事件描述里，该试验就会被返回。实测噪声包括睾酮试验、依托泊苷卡铂化疗试验、钙羟基苯磺酸糖尿病肾病试验。
+
+因此对 ISRCTN / CTIS 命中必须再做一次**主题字段复核**，只保留疾病短语出现在标题或 condition 字段中的记录：
+
+```text
+title / scientificTitle / conditions/condition/description / diseaseClass*   (ISRCTN)
+ctTitle / conditions                                                          (CTIS)
+```
+
+匹配短语集合同时覆盖肾小球病伞形术语（`glomerular disease`、`glomerulonephritis`、`glomerulopathy`、`podocytopathy`、`FSGS`），否则会误杀 basket trial——实测 CTIS 的 Atacicept PIONEER 试验 condition 写作 "Multiple Autoimmune Glomerular Diseases"，仅用 MCD/肾病综合征短语会漏掉。
+
+### 防止静默截断
+
+ISRCTN 请求 `limit=500` 后必须读取根节点 `totalCount`；若 `totalCount > limit`，视为检索失败并抛错，不得使用被截断的结果集。
 
 若 registry 字段不能可靠给出“结果已发表”，不得从非空字符串简单推断 `has_results=true`；保留原始 publication stage，并在解读层判断。
 
@@ -203,4 +222,6 @@ GET https://www.ebi.ac.uk/europepmc/webservices/rest/search
 - ESearch 必须分页取全，禁止固定 `retmax=400` 后截断。
 - 单查询结果若超过 PubMed 可安全获取上限，应拆分日期窗口。
 - 对候选 PMID 必须至少 EFetch abstract；ESummary 元数据不足以支持证据评级。
+- EFetch 响应中除 `<PubmedArticle>` 外还可能包含 `<PubmedBookArticle>`（StatPearls、GeneReviews 等 NCBI Bookshelf 条目，使用 `BookDocument` 而非 `MedlineCitation/Article`）。必须一并解析，否则完整性校验会因"缺失 PMID"中断整次月度运行。这类记录标记为 `peer_review_status=book_chapter`，属三级教育性内容。
+- 所有 E-utilities 请求必须携带 `tool` 与 `email` 参数（`NCBI_TOOL` / `NCBI_EMAIL` 环境变量），这是 NCBI 的使用要求。
 - 拟进入正文的研究，如有合法全文，进一步阅读全文并记录 `evidence_basis=full_text`；否则写 `abstract_only`。
