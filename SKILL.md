@@ -1,5 +1,6 @@
 ---
 name: med-skill
+user-invocable: true
 description: 儿童肾病综合征与微小病变肾病（MCD）living evidence surveillance，面向患儿家长。用于按月检索、核验和总结 SSNS/FRNS/SDNS/MCD 的机制、治疗、生物标志物、自然史与安全性、指南共识和临床试验进展，生成简体中文增量证据简报，并把证据转成可带去门诊与主诊医师讨论的问题。涉及 rituximab、MMF、CNI、抗 nephrin、足细胞机制、复发风险、儿童肾病最新进展、儿童肾病指南、trial registry 更新、monthly evidence brief，或家长想了解孩子肾病的最新研究进展时使用。不提供诊断、用药或剂量建议。
 ---
 
