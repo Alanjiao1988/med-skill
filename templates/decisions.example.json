@@ -1,7 +1,8 @@
 {
-  "run_id": "COPY-EXACTLY-FROM-candidates-YYYY-MM.json",
+  "schema_version": 3,
+  "run_id": "COPY-EXACTLY-FROM-candidates-YYYY-MM-RUN_ID.json",
   "brief_generated": true,
-  "brief_path": "out/brief-YYYY-MM.md",
+  "brief_path": "out/brief-YYYY-MM-RUN_ID.md",
   "items": {
     "PMID:40123456": {
       "verdict": "material",
@@ -12,6 +13,11 @@
       },
       "peer_review_status": "peer_reviewed",
       "evidence_basis": "full_text",
+      "material_basis": "strength_novelty",
+      "claim_type": "treatment",
+      "population_directness": "direct",
+      "what_this_changes": "示例：新增了与既有 baseline 不同的直接比较证据。",
+      "what_this_does_not_prove": "示例：不能证明长期安全性或所有儿童亚组同样获益。",
       "paradigm_status": "EXTENDS_EXISTING_MODEL"
     },
     "PPR:PPR1281037": {

@@ -4,6 +4,8 @@ patient-profile.md
 # 运行时状态（含相关性打分痕迹）与输出
 state/seen.json
 state/seen.json.tmp
+state/seen.json.lock
+state/.seen.json.*.tmp
 out/
 
 __pycache__/

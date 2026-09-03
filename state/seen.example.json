@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "queries_version": 2,
   "last_run": "2026-08-23",
   "window_end_edat": "2026-08-23",
@@ -14,7 +14,19 @@
       "hits": 214,
       "material": 5,
       "brief_generated": true,
-      "brief_path": "out/brief-2026-08.md"
+      "brief_path": "out/brief-2026-08-6f00b445-EXAMPLE-4ef4-acde-000000000001.md",
+      "candidates_path": "out/candidates-2026-08-6f00b445-EXAMPLE-4ef4-acde-000000000001.json",
+      "decisions_path": "out/decisions-2026-08-6f00b445-EXAMPLE-4ef4-acde-000000000001.json",
+      "candidates_sha256": "example-candidates-sha256",
+      "decisions_sha256": "example-decisions-sha256",
+      "brief_sha256": "example-brief-sha256",
+      "report_archive": {
+        "repository": "Alanjiao1988/Med-report",
+        "path": "reports/2026/2026-08/brief-2026-08-6f00b445-EXAMPLE-4ef4-acde-000000000001.md",
+        "url": "https://github.com/Alanjiao1988/Med-report/blob/main/reports/2026/2026-08/brief-2026-08-6f00b445-EXAMPLE-4ef4-acde-000000000001.md",
+        "file_sha": "example-git-blob-sha",
+        "commit_sha": "example-git-commit-sha"
+      }
     }
   ],
   "seen": {

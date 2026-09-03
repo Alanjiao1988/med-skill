@@ -22,6 +22,12 @@ python -m unittest discover -s tests -p "test_*.py" -v
 - ClinicalTrials.gov 检索短语保持加引号
 - PubMed book 记录可解析，且标记为 `book_chapter` 而非 `peer_reviewed`
 - E-utilities 请求携带 NCBI 要求的 tool 身份
+- 评分越界、未知 decision id、book chapter material 会被拒绝
+- preprint DOI 不能绕过 baseline 限制
+- candidate counts/schema、brief 路径与 run marker 会被校验
+- 旧窗口不能回滚 state；重复 run commit 保持幂等
+- 报告仓库必须 private；归档失败时 state 不前移
+- 同月 candidate 文件名包含 run_id，不发生覆盖
 
 这些测试不联网。
 
@@ -30,7 +36,7 @@ python -m unittest discover -s tests -p "test_*.py" -v
 ```bash
 python scripts/fetch_evidence.py --start 2026-06-01 --end 2026-07-31
 mkdir -p tests/fixture-2026-07
-cp out/candidates-2026-07.json tests/fixture-2026-07/candidates.json
+cp out/candidates-2026-07-RUN_ID.json tests/fixture-2026-07/candidates.json
 ```
 
 把人工复核后的：
@@ -92,11 +98,17 @@ tests/fixture-2026-07/expected-decisions.json
 - [ ] candidate artifact 有唯一 `run_id`
 - [ ] commit 要求 candidate 与 decisions 的 `run_id` 完全一致
 - [ ] `brief_generated` 不是 true 时 commit 必须拒绝
-- [ ] commit 阶段不联网重新抓取
+- [ ] brief 必须存在于 `out/`，带 run/period 标记和医疗免责
+- [ ] commit 阶段不重新抓取证据；只允许访问 GitHub 归档 brief
 - [ ] 每个新 paper / publication transition / preprint candidate 都必须有明确 decision；缺任何一项时 fail closed
-- [ ] material decision 必须有明确 `evidence_basis`
+- [ ] 未知 decision id 被拒绝，不会虚增 material count
+- [ ] S/N/R 范围、material basis、claim type、population directness 均被校验
+- [ ] material decision 必须有明确 `evidence_basis`、`what_this_changes` 和 `what_this_does_not_prove`
 - [ ] preprint 不能使用 `verdict=material`
-- [ ] baseline 的 `sources` 不含 `PPR:`
+- [ ] book chapter 不能使用 `verdict=material`
+- [ ] baseline 的 `sources` 不含 `PPR:` 或已知 preprint DOI
+- [ ] 同一 `run_id` 重复提交幂等；旧窗口/query version 不得回滚 state
+- [ ] 报告先归档到 private repo，失败时 state 不写入
 - [ ] publication transition 后正式 PMID 建立新 entry，PPR 历史 entry 写 `superseded_by`
 
 ## 家长层必须满足

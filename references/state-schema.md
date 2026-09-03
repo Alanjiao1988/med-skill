@@ -2,12 +2,13 @@
 
 运行时状态：`state/seen.json`（已 gitignore）。状态可能包含患者相关性打分痕迹，不得提交。
 
-本版本使用 **candidate → decision → state commit** 两阶段提交，避免“简报还没真正生成就把文献标记为已见”的数据丢失风险。
+本版本使用 **candidate → decision + brief → private report archive → state commit**
+事务，避免“简报还没真正生成或尚未归档，就把文献标记为已见”的数据丢失风险。
 
 ## Schema version
 
 ```text
-schema_version: 2
+schema_version: 3
 queries_version: 2
 ```
 
@@ -15,7 +16,7 @@ queries_version: 2
 
 ```jsonc
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "queries_version": 2,
   "last_run": "2026-08-23",
   "window_end_edat": "2026-08-23",
@@ -26,7 +27,16 @@ queries_version: 2
       "window": ["2026-07-08", "2026-08-23"],
       "hits": 123,
       "material": 5,
-      "brief_generated": true
+      "brief_generated": true,
+      "brief_path": "out/brief-2026-08-RUN_ID.md",
+      "candidates_sha256": "...",
+      "decisions_sha256": "...",
+      "brief_sha256": "...",
+      "report_archive": {
+        "repository": "Alanjiao1988/Med-report",
+        "path": "reports/2026/2026-08/brief-2026-08-RUN_ID.md",
+        "commit_sha": "..."
+      }
     }
   ],
   "seen": {
@@ -70,15 +80,20 @@ queries_version: 2
 
 ## Candidate artifact
 
-抓取阶段输出 `out/candidates-YYYY-MM.json`。必须包含：
+抓取阶段输出 `out/candidates-YYYY-MM-RUN_ID.json`。同月重跑不得覆盖旧文件。
+必须包含：
 
 ```jsonc
 {
-  "run_id": "uuid-or-hash",
+  "schema_version": 3,
+  "run_id": "UUID",
   "period": "2026-08",
   "mode": "delta",
   "window": ["2026-07-08", "2026-08-23"],
   "queries_version": 2,
+  "generated_at": "2026-08-23T10:00:00+08:00",
+  "report_repository": "Alanjiao1988/Med-report",
+  "core_sources_complete": true,
   "source_errors": [],
   "new_papers": [],
   "publication_transitions": [],
@@ -97,15 +112,21 @@ queries_version: 2
 
 ```jsonc
 {
+  "schema_version": 3,
   "run_id": "必须与 candidates 完全相同",
   "brief_generated": true,
-  "brief_path": "out/brief-2026-08.md",
+  "brief_path": "out/brief-2026-08-RUN_ID.md",
   "items": {
     "PMID:40123456": {
       "verdict": "material",
       "scores": {"S": 4, "N": 2, "R": 3},
       "peer_review_status": "peer_reviewed",
-      "evidence_basis": "full_text"
+      "evidence_basis": "full_text",
+      "material_basis": "strength_novelty",
+      "claim_type": "treatment",
+      "population_directness": "direct",
+      "what_this_changes": "...",
+      "what_this_does_not_prove": "..."
     }
   },
   "baseline": {
@@ -120,13 +141,22 @@ queries_version: 2
 
 `--commit-state` 必须同时读取 candidate + decisions，并验证：
 
-1. `run_id` 一致；
-2. `brief_generated == true`；
-3. candidate 文件存在且结构有效；
-4. decisions 中 material 条目具有 S/N/R 或明确 N/A；
-5. baseline 不包含预印本作为正式证据来源。
+1. candidate 与 decisions 都是 schema v3，且 `run_id` 一致；
+2. candidate 完整、核心源完成、counts 与数组长度一致；
+3. decisions 恰好覆盖全部 paper/preprint candidates，不多也不少；
+4. S/N/R 在合法范围，preprint 的暂定 S≤3；
+5. material 条目满足明确 `material_basis`，并具有 claim type、适用性、
+   evidence basis、`what_this_changes` 与 `what_this_does_not_prove`；
+6. preprint 和 book chapter 不能成为 material；
+7. baseline 只引用 state/current candidates 中可核验的正式来源；PPR、已知
+   preprint DOI 和 book chapter 均被拒绝；
+8. brief 文件真实存在于 `out/`，是 UTF-8 Markdown，包含精确 run/period
+   标记及医疗免责；
+9. `run_id` 幂等，window end 与 query version 不得倒退；
+10. 报告目标仓库必须为 private，且归档成功后才允许写 state。
 
-提交阶段**不得重新运行网络检索**，否则分析过的候选集与最终写入 state 的候选集可能发生漂移。
+提交阶段不得重新运行证据检索。它只访问 GitHub 以归档已经生成并验证过的
+brief。state 使用跨平台文件锁、唯一临时文件和 `os.replace` 原子写入。
 
 ---
 
@@ -228,7 +258,8 @@ baseline 是“当前正式证据判断”，不能因为一项高相关或高 n
 
 ### 预印本
 
-PPR 永远不能作为 baseline 的唯一正式来源。可以存放在独立 `watchlist`（如宿主需要），但不得进入正式 baseline。
+PPR 永远不能进入正式 baseline，即使同一 claim 还引用了其他正式来源。可以存放在
+独立 `watchlist`（如宿主需要），但不得作为 baseline source。
 
 ---
 

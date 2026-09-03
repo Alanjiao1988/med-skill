@@ -2,6 +2,9 @@
 
 严格套用本模板。无内容时写“本期无”，不要删除小节。
 
+<!-- med-skill-run-id: {{run_id}} -->
+<!-- med-skill-period: {{YYYY-MM}} -->
+
 ---
 
 # 儿童 MCD / 肾病综合征证据月报 · {{YYYY-MM}}
@@ -67,7 +70,7 @@
 **来源**：{{PMID / DOI / guideline URL}} · {{journal / organization}} · {{date}}  
 **领域**：{{A/B/C/D/E，可多选}}  
 **人群**：{{儿童 / 成人 / 混合}} · {{biopsy-confirmed MCD / presumed MCD / SSNS / FRNS / SDNS / FSGS / mixed}}  
-**claim type**：{{treatment / mechanism / diagnostic biomarker / prognostic biomarker / predictive biomarker / natural history / safety / guideline}}  
+**claim type**：{{treatment / mechanism / diagnostic_biomarker / prognostic_biomarker / predictive_biomarker / natural_history / safety / guideline}}
 **证据基础**：{{full_text / abstract_only / guideline_full_text}}  
 **同行评议**：{{peer_reviewed / guideline}}  
 **适用性**：{{population_directness}}  

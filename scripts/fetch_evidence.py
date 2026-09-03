@@ -6,18 +6,27 @@ Fetch phase:
     python scripts/fetch_evidence.py --bootstrap
     python scripts/fetch_evidence.py --start 2026-07-01 --end 2026-08-23
 
-Commit phase (NO network):
+Commit phase (no evidence retrieval; private GitHub archive only):
     python scripts/fetch_evidence.py --commit-state \
-      --candidates out/candidates-2026-08.json \
-      --decisions out/decisions-2026-08.json
+      --candidates out/candidates-2026-08-<run-id>.json \
+      --decisions out/decisions-2026-08-<run-id>.json
+
+Commit archives the validated brief to the configured private GitHub report
+repository before advancing local state.
 """
 
 import argparse
+import base64
+import binascii
+import contextlib
 import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import time
 import unicodedata
 import urllib.parse
@@ -37,6 +46,8 @@ QUERIES_MD = os.path.join(ROOT, "references", "search-queries.md")
 STATE_PATH = os.path.join(ROOT, "state", "seen.json")
 OUT_DIR = os.path.join(ROOT, "out")
 
+SKILL_VERSION = "0.5.0"
+STATE_SCHEMA_VERSION = 3
 EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 CTGOV = "https://clinicaltrials.gov/api/v2/studies"
 ISRCTN = "https://www.isrctn.com/api/query/format/default"
@@ -47,12 +58,41 @@ ISRCTN_NS = "{http://www.67bricks.com/isrctn}"
 API_KEY = os.environ.get("NCBI_API_KEY", "")
 NCBI_TOOL = os.environ.get("NCBI_TOOL", "med-skill")
 NCBI_EMAIL = os.environ.get("NCBI_EMAIL", "")
+REPORT_REPO_DEFAULT = os.environ.get("MED_REPORT_REPO", "Alanjiao1988/Med-report")
 SLEEP = 0.11 if API_KEY else 0.34
 WINDOW_OVERLAP_DAYS = 15
 MAX_PUBMED_ESEARCH = 10000
-UA = "med-skill-evidence-surveillance/0.3"
+MAX_REPORT_BYTES = 1_000_000
+UA = "med-skill-evidence-surveillance/" + SKILL_VERSION
 KEY_PREFIX = {"CTGOV": "NCT:", "ISRCTN": "ISRCTN:", "CTIS": "CTIS:"}
 VALID_VERDICTS = {"material", "appendix", "preprint_watchlist", "discarded"}
+CLAIM_TYPES = {
+    "treatment",
+    "mechanism",
+    "diagnostic_biomarker",
+    "prognostic_biomarker",
+    "predictive_biomarker",
+    "natural_history",
+    "safety",
+    "guideline",
+}
+POPULATION_DIRECTNESS = {"direct", "indirect", "mixed", "not_applicable"}
+MATERIAL_BASES = {
+    "strength_novelty",
+    "patient_relevance",
+    "negative_result",
+    "new_safety_signal",
+    "guideline_change",
+}
+PARADIGM_STATUSES = {
+    "CONFIRMS_EXISTING_MODEL",
+    "EXTENDS_EXISTING_MODEL",
+    "CHALLENGES_EXISTING_MODEL",
+    "NEW_HYPOTHESIS",
+    "PARADIGM_SHIFT_CANDIDATE",
+    "CLINICALLY_VALIDATED_CHANGE",
+}
+BASELINE_SECTIONS = {"treatment", "mechanism", "biomarkers", "natural_history", "guidelines"}
 NEWLINE = chr(10)
 
 
@@ -60,11 +100,19 @@ def eutils_params(**kw):
     """Every E-utilities call must carry tool/email identity per NCBI policy."""
     p = dict(kw)
     p["tool"] = NCBI_TOOL
-    if NCBI_EMAIL:
-        p["email"] = NCBI_EMAIL
+    p["email"] = NCBI_EMAIL
     if API_KEY:
         p["api_key"] = API_KEY
     return p
+
+
+def ensure_ncbi_identity():
+    if not NCBI_TOOL.strip():
+        raise RuntimeError("NCBI_TOOL must be non-empty")
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", NCBI_EMAIL):
+        raise RuntimeError(
+            "NCBI_EMAIL is required for PubMed retrieval; set it to a valid contact email"
+        )
 
 
 def request_bytes(req, retries=4, timeout=90):
@@ -134,11 +182,126 @@ def load_state():
 
 
 def write_json_atomic(path, obj):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(
+        prefix="." + os.path.basename(path) + ".",
+        suffix=".tmp",
+        dir=directory,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+@contextlib.contextmanager
+def state_lock():
+    """Serialize state commits without leaving a stale ownership sentinel."""
+    lock_path = STATE_PATH + ".lock"
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    lock_file = open(lock_path, "a+b")
+    acquired = False
+    try:
+        lock_file.seek(0, os.SEEK_END)
+        if lock_file.tell() == 0:
+            lock_file.write(b"0")
+            lock_file.flush()
+        lock_file.seek(0)
+
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as ex:
+            raise RuntimeError("another state commit is already in progress") from ex
+
+        acquired = True
+        yield
+    finally:
+        if acquired:
+            lock_file.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        lock_file.close()
+
+
+def sha256_bytes(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def read_json_artifact(path, label):
+    absolute = os.path.abspath(path)
+    try:
+        with open(absolute, "rb") as f:
+            raw = f.read()
+    except OSError as ex:
+        raise ValueError(f"{label} cannot be read: {absolute}: {ex}") from ex
+    try:
+        obj = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as ex:
+        raise ValueError(f"{label} is not valid UTF-8 JSON: {absolute}: {ex}") from ex
+    return obj, absolute, sha256_bytes(raw)
+
+
+def require_path_within_out(path, label, extension):
+    real_out = os.path.realpath(OUT_DIR)
+    real_path = os.path.realpath(path)
+    try:
+        within_out = os.path.commonpath([real_out, real_path]) == real_out
+    except ValueError:
+        within_out = False
+    if not within_out or os.path.splitext(real_path)[1].lower() != extension:
+        raise ValueError(f"{label} must be a {extension} file inside out/")
+    return real_path
+
+
+def run_gh_json(args, input_obj=None, allow_not_found=False):
+    if not shutil.which("gh"):
+        raise RuntimeError("GitHub CLI 'gh' is required to archive reports")
+
+    try:
+        proc = subprocess.run(
+            ["gh"] + list(args),
+            input=json.dumps(input_obj, ensure_ascii=False) if input_obj is not None else None,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired as ex:
+        raise RuntimeError("gh command timed out after 120 seconds") from ex
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        if allow_not_found and ("HTTP 404" in detail or "Not Found" in detail):
+            return None
+        raise RuntimeError("gh command failed: " + detail[:500])
+
+    output = proc.stdout.strip()
+    if not output:
+        return {}
+    try:
+        return json.loads(output)
+    except json.JSONDecodeError as ex:
+        raise RuntimeError("gh returned invalid JSON: " + output[:300]) from ex
 
 
 def load_queries():
@@ -731,17 +894,30 @@ def seen_key_lookup(seen, rec):
 
 
 def resolve_window(args, state, today):
+    if bool(args.start) != bool(args.end):
+        raise ValueError("--start and --end must be provided together")
     if args.start and args.end:
         start = datetime.strptime(args.start, "%Y-%m-%d").date()
         end = datetime.strptime(args.end, "%Y-%m-%d").date()
+        if start > end:
+            raise ValueError("--start must be on or before --end")
+        if end > today:
+            raise ValueError("--end cannot be in the future")
         return start, end, "bootstrap" if args.bootstrap else "delta"
     if args.bootstrap or state is None:
         return today - timedelta(days=730), today, "bootstrap"
-    prev = datetime.strptime(state["window_end_edat"], "%Y-%m-%d").date()
+    prior_end = state.get("window_end_edat")
+    if not prior_end:
+        raise ValueError("state.window_end_edat is missing")
+    prev = datetime.strptime(prior_end, "%Y-%m-%d").date()
+    if prev > today:
+        raise ValueError("state.window_end_edat is in the future")
     return prev - timedelta(days=WINDOW_OVERLAP_DAYS), today, "delta"
 
 
 def paper_candidate_id(rec):
+    if rec.get("peer_review_status") == "preprint" and rec.get("epmc_id"):
+        return "PPR:" + rec["epmc_id"]
     if rec.get("pmid"):
         return "PMID:" + rec["pmid"]
     if rec.get("epmc_id"):
@@ -749,6 +925,14 @@ def paper_candidate_id(rec):
     if rec.get("doi"):
         return "DOI:" + norm_doi(rec["doi"])
     return "TITLE:" + hashlib.sha256(norm_title(rec.get("title", "")).encode("utf-8")).hexdigest()[:16]
+
+
+def candidate_artifact_path(period, run_id):
+    return os.path.join(OUT_DIR, f"candidates-{period}-{run_id}.json")
+
+
+def report_archive_path(period, run_id):
+    return f"reports/{period[:4]}/{period}/brief-{period}-{run_id}.md"
 
 
 def classify_trial_change(prior, current):
@@ -768,7 +952,12 @@ def classify_trial_change(prior, current):
 # ---------------- Fetch phase ----------------
 
 def fetch_phase(args):
+    ensure_ncbi_identity()
     state = load_state()
+    if state is not None and state.get("schema_version") not in (2, STATE_SCHEMA_VERSION):
+        raise ValueError(
+            f"unsupported state schema_version {state.get('schema_version')!r}"
+        )
     today = date.today()
     start, end, mode = resolve_window(args, state, today)
     qver, frag, tracks = load_queries()
@@ -854,13 +1043,14 @@ def fetch_phase(args):
     run_id = str(uuid.uuid4())
     period = "{:%Y-%m}".format(end)
     payload = {
-        "schema_version": 2,
+        "schema_version": STATE_SCHEMA_VERSION,
         "run_id": run_id,
         "period": period,
         "mode": mode,
         "window": [str(start), str(end)],
         "queries_version": qver,
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "report_repository": args.report_repo,
         "core_sources_complete": True,
         "supplemental_sources_complete": not source_errors,
         "source_errors": source_errors,
@@ -889,7 +1079,7 @@ def fetch_phase(args):
     }
 
     os.makedirs(OUT_DIR, exist_ok=True)
-    out_path = os.path.join(OUT_DIR, "candidates-" + period + ".json")
+    out_path = candidate_artifact_path(period, run_id)
     write_json_atomic(out_path, payload)
     print("-> " + out_path, file=sys.stderr)
     print("state NOT written; generate brief + decisions, then use --commit-state", file=sys.stderr)
@@ -905,144 +1095,685 @@ def iter_candidate_papers(candidates):
         yield rec
 
 
-def validate_no_preprint_baseline(baseline):
-    for section, claims in (baseline or {}).items():
-        if not isinstance(claims, list):
-            continue
-        for claim in claims:
-            for src in claim.get("sources", []) if isinstance(claim, dict) else []:
-                if str(src).startswith("PPR:"):
-                    raise ValueError(f"baseline {section} contains preprint-only source {src}")
+def parse_iso_date(value, label):
+    if not isinstance(value, str):
+        raise ValueError(f"{label} must be an ISO date string")
+    try:
+        return date.fromisoformat(value)
+    except ValueError as ex:
+        raise ValueError(f"{label} must use YYYY-MM-DD") from ex
+
+
+def validate_candidate_artifact(candidates):
+    if not isinstance(candidates, dict):
+        raise ValueError("candidates must be a JSON object")
+    if candidates.get("schema_version") != STATE_SCHEMA_VERSION:
+        raise ValueError(
+            f"candidates.schema_version must be {STATE_SCHEMA_VERSION}; refetch with this skill version"
+        )
+
+    run_id = candidates.get("run_id")
+    try:
+        uuid.UUID(str(run_id))
+    except (ValueError, AttributeError, TypeError) as ex:
+        raise ValueError("candidates.run_id must be a UUID") from ex
+
+    period = candidates.get("period")
+    if not isinstance(period, str) or not re.fullmatch(r"\d{4}-\d{2}", period):
+        raise ValueError("candidates.period must use YYYY-MM")
+    if candidates.get("mode") not in ("delta", "bootstrap"):
+        raise ValueError("candidates.mode must be delta or bootstrap")
+
+    window = candidates.get("window")
+    if not isinstance(window, list) or len(window) != 2:
+        raise ValueError("candidates.window must contain [start, end]")
+    start = parse_iso_date(window[0], "candidates.window[0]")
+    end = parse_iso_date(window[1], "candidates.window[1]")
+    if start > end:
+        raise ValueError("candidates.window start must be on or before end")
+    if period != end.strftime("%Y-%m"):
+        raise ValueError("candidates.period must match the window end month")
+
+    query_version = candidates.get("queries_version")
+    if type(query_version) is not int or query_version < 1:
+        raise ValueError("candidates.queries_version must be a positive integer")
+    if candidates.get("core_sources_complete") is not True:
+        raise ValueError("core PubMed retrieval is incomplete; refusing state commit")
+    if not isinstance(candidates.get("source_errors"), list):
+        raise ValueError("candidates.source_errors must be an array")
+    supplemental_complete = candidates.get("supplemental_sources_complete")
+    if type(supplemental_complete) is not bool:
+        raise ValueError("candidates.supplemental_sources_complete must be boolean")
+    if supplemental_complete != (not candidates["source_errors"]):
+        raise ValueError(
+            "candidates.supplemental_sources_complete conflicts with source_errors"
+        )
+
+    generated_at = candidates.get("generated_at")
+    if not isinstance(generated_at, str):
+        raise ValueError("candidates.generated_at is required")
+    try:
+        generated_datetime = datetime.fromisoformat(generated_at)
+    except ValueError as ex:
+        raise ValueError("candidates.generated_at must be ISO-8601") from ex
+    if generated_datetime.utcoffset() is None:
+        raise ValueError("candidates.generated_at must include a timezone offset")
+
+    report_repository = candidates.get("report_repository")
+    if not isinstance(report_repository, str) or not re.fullmatch(
+        r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", report_repository
+    ):
+        raise ValueError("candidates.report_repository must use owner/repo")
+
+    bucket_names = (
+        "new_papers",
+        "publication_transitions",
+        "cross_track_updates",
+        "trials_new",
+        "trials_changed",
+        "preprints",
+    )
+    for bucket in bucket_names:
+        if not isinstance(candidates.get(bucket), list):
+            raise ValueError(f"candidates.{bucket} must be an array")
+
+    counts = candidates.get("counts")
+    if not isinstance(counts, dict):
+        raise ValueError("candidates.counts must be an object")
+    for bucket in bucket_names:
+        if type(counts.get(bucket)) is not int or counts[bucket] < 0:
+            raise ValueError(f"candidates.counts.{bucket} must be a non-negative integer")
+        if counts.get(bucket) != len(candidates[bucket]):
+            raise ValueError(f"candidates.counts.{bucket} does not match its array length")
+    if type(counts.get("pubmed_unique_hits")) is not int or counts["pubmed_unique_hits"] < 0:
+        raise ValueError("candidates.counts.pubmed_unique_hits must be a non-negative integer")
+
+    candidate_ids = set()
+    for rec in iter_candidate_papers(candidates):
+        if not isinstance(rec, dict):
+            raise ValueError("paper candidates must be objects")
+        cid = rec.get("candidate_id") or paper_candidate_id(rec)
+        if not isinstance(cid, str) or not cid:
+            raise ValueError("every paper candidate requires candidate_id")
+        if cid != paper_candidate_id(rec):
+            raise ValueError(f"{cid}: candidate_id does not match its source identifier")
+        if cid in candidate_ids:
+            raise ValueError(f"duplicate candidate_id: {cid}")
+        candidate_ids.add(cid)
+        if not str(rec.get("title", "")).strip():
+            raise ValueError(f"{cid}: title is required")
+        tracks = rec.get("track")
+        if (
+            not isinstance(tracks, list)
+            or not tracks
+            or any(track not in "ABCDE" for track in tracks)
+        ):
+            raise ValueError(f"{cid}: track must be a non-empty A-E array")
+
+    for rec in candidates["preprints"]:
+        if rec.get("peer_review_status") != "preprint" or not rec.get("epmc_id"):
+            raise ValueError("preprint candidates require peer_review_status=preprint and epmc_id")
+    for rec in candidates["publication_transitions"]:
+        if rec.get("publication_transition") is not True or not rec.get("prior_key"):
+            raise ValueError("publication transitions require publication_transition=true and prior_key")
+    for rec in candidates["cross_track_updates"]:
+        if not rec.get("prior_key") or not isinstance(rec.get("new_tracks"), list):
+            raise ValueError("cross-track updates require prior_key and new_tracks")
+
+    trial_ids = set()
+    for bucket, expected_event in (
+        ("trials_new", "new_registration"),
+        ("trials_changed", None),
+    ):
+        for trial in candidates[bucket]:
+            if not isinstance(trial, dict):
+                raise ValueError(f"candidates.{bucket} entries must be objects")
+            if trial.get("registry") not in KEY_PREFIX:
+                raise ValueError(f"candidates.{bucket} has unsupported registry")
+            key = trial_key(trial)
+            if key.endswith(":") or key in trial_ids:
+                raise ValueError(f"invalid or duplicate trial identifier: {key}")
+            trial_ids.add(key)
+            if expected_event and trial.get("event") != expected_event:
+                raise ValueError(f"{key}: new trial must use event={expected_event}")
+            if bucket == "trials_changed" and trial.get("event") not in {
+                "status_changed",
+                "results_posted",
+                "early_stop",
+                "protocol_record_updated",
+            }:
+                raise ValueError(f"{key}: invalid changed-trial event")
+            if not str(trial.get("title", "")).strip():
+                raise ValueError(f"{key}: title is required")
+            if not trial.get("protocol_hash"):
+                raise ValueError(f"{key}: protocol_hash is required")
+
+    return start, end
+
+
+def score_value(scores, key, maximum):
+    value = scores.get(key)
+    if type(value) is not int or not 1 <= value <= maximum:
+        raise ValueError(f"score {key} must be an integer from 1 to {maximum}")
+    return value
+
+
+def material_basis_is_valid(basis, claim_type, evidence_basis, s_score, n_score, r_score):
+    if basis == "strength_novelty":
+        return s_score >= 3 and n_score >= 2
+    if basis == "patient_relevance":
+        return r_score == 3 and s_score >= 2
+    if basis == "negative_result":
+        return s_score >= 3
+    if basis == "new_safety_signal":
+        return claim_type == "safety" and s_score >= 2
+    if basis == "guideline_change":
+        return (
+            claim_type == "guideline"
+            and n_score == 3
+            and evidence_basis == "guideline_full_text"
+        )
+    return False
 
 
 def validate_decisions(candidates, decisions):
+    if not isinstance(decisions, dict):
+        raise ValueError("decisions must be a JSON object")
+    if decisions.get("schema_version") != STATE_SCHEMA_VERSION:
+        raise ValueError(f"decisions.schema_version must be {STATE_SCHEMA_VERSION}")
+
     item_decisions = decisions.get("items")
     if not isinstance(item_decisions, dict):
         raise ValueError("decisions.items must be an object keyed by candidate_id")
 
-    missing = []
+    candidate_by_id = {}
     for rec in iter_candidate_papers(candidates):
         cid = rec.get("candidate_id") or paper_candidate_id(rec)
-        decision = item_decisions.get(cid)
-        if not isinstance(decision, dict):
-            missing.append(cid)
-            continue
+        candidate_by_id[cid] = rec
 
-        verdict = decision.get("verdict")
-        if verdict not in VALID_VERDICTS:
-            raise ValueError(f"{cid}: invalid verdict {verdict!r}")
-
-        scores = decision.get("scores")
-        if not isinstance(scores, dict) or "S" not in scores or "N" not in scores or "R" not in scores:
-            raise ValueError(f"{cid}: decisions must include explicit S/N/R (R may be 'N/A')")
-
-        if rec.get("peer_review_status") == "preprint" and verdict == "material":
-            raise ValueError(f"{cid}: a preprint cannot use verdict='material'; use preprint_watchlist/appendix/discarded")
-
-        if verdict == "material":
-            evidence_basis = decision.get("evidence_basis")
-            if evidence_basis not in ("full_text", "abstract_only", "guideline_full_text"):
-                raise ValueError(f"{cid}: material item requires explicit evidence_basis")
-
+    expected = set(candidate_by_id)
+    actual = set(item_decisions)
+    missing = sorted(expected - actual)
+    unknown = sorted(actual - expected)
     if missing:
         preview = ", ".join(missing[:10])
         more = " ..." if len(missing) > 10 else ""
         raise ValueError(
             "decisions incomplete; refusing to mark unreviewed candidates as seen: " + preview + more
         )
+    if unknown:
+        preview = ", ".join(unknown[:10])
+        more = " ..." if len(unknown) > 10 else ""
+        raise ValueError("decisions contains unknown candidate IDs: " + preview + more)
+
+    for cid, rec in candidate_by_id.items():
+        decision = item_decisions.get(cid)
+        if not isinstance(decision, dict):
+            raise ValueError(f"{cid}: decision must be an object")
+
+        verdict = decision.get("verdict")
+        if verdict not in VALID_VERDICTS:
+            raise ValueError(f"{cid}: invalid verdict {verdict!r}")
+
+        scores = decision.get("scores")
+        if not isinstance(scores, dict):
+            raise ValueError(f"{cid}: decisions must include explicit S/N/R (R may be 'N/A')")
+        try:
+            s_score = score_value(scores, "S", 5)
+            n_score = score_value(scores, "N", 3)
+        except ValueError as ex:
+            raise ValueError(f"{cid}: {ex}") from ex
+        r_score = scores.get("R")
+        if r_score != "N/A" and (type(r_score) is not int or not 1 <= r_score <= 3):
+            raise ValueError(f"{cid}: score R must be 1-3 or 'N/A'")
+
+        peer_status = rec.get("peer_review_status", "peer_reviewed")
+        stated_status = decision.get("peer_review_status")
+        if stated_status is not None and stated_status != peer_status:
+            raise ValueError(f"{cid}: decision peer_review_status does not match candidate")
+        if peer_status == "preprint":
+            if s_score > 3:
+                raise ValueError(f"{cid}: preprint provisional S cannot exceed 3")
+            if verdict == "material":
+                raise ValueError(
+                    f"{cid}: a preprint cannot use verdict='material'; "
+                    "use preprint_watchlist/appendix/discarded"
+                )
+        elif verdict == "preprint_watchlist":
+            raise ValueError(f"{cid}: preprint_watchlist is only valid for preprints")
+        if peer_status == "book_chapter":
+            if verdict == "material":
+                raise ValueError(f"{cid}: book chapters cannot be material evidence")
+            if s_score != 1 or n_score != 1:
+                raise ValueError(f"{cid}: book chapters must use S=1 and N=1")
+
+        paradigm_status = decision.get("paradigm_status")
+        if paradigm_status is not None and paradigm_status not in PARADIGM_STATUSES:
+            raise ValueError(f"{cid}: invalid paradigm_status {paradigm_status!r}")
+
+        if verdict == "material":
+            evidence_basis = decision.get("evidence_basis")
+            if evidence_basis not in ("full_text", "abstract_only", "guideline_full_text"):
+                raise ValueError(f"{cid}: material item requires explicit evidence_basis")
+            claim_type = decision.get("claim_type")
+            if claim_type not in CLAIM_TYPES:
+                raise ValueError(f"{cid}: material item requires a valid claim_type")
+            if (claim_type == "guideline") != (evidence_basis == "guideline_full_text"):
+                raise ValueError(
+                    f"{cid}: guideline claims require guideline_full_text, "
+                    "which is only valid for guideline claims"
+                )
+            directness = decision.get("population_directness")
+            if directness not in POPULATION_DIRECTNESS:
+                raise ValueError(f"{cid}: material item requires population_directness")
+            for field in ("what_this_changes", "what_this_does_not_prove"):
+                if not isinstance(decision.get(field), str) or not decision[field].strip():
+                    raise ValueError(f"{cid}: material item requires non-empty {field}")
+            basis = decision.get("material_basis")
+            if basis not in MATERIAL_BASES:
+                raise ValueError(f"{cid}: material item requires a valid material_basis")
+            if not material_basis_is_valid(
+                basis,
+                claim_type,
+                evidence_basis,
+                s_score,
+                n_score,
+                r_score,
+            ):
+                raise ValueError(f"{cid}: scores/claim do not satisfy material_basis={basis}")
+
+
+def source_status_index(candidates, state):
+    index = {}
+    for key, entry in (state or {}).get("seen", {}).items():
+        if not isinstance(entry, dict):
+            continue
+        status = entry.get("peer_review_status")
+        index[key] = status
+        doi = norm_doi(entry.get("doi", ""))
+        if doi:
+            index[doi] = status
+            index["DOI:" + doi] = status
+
+    for rec in iter_candidate_papers(candidates):
+        status = rec.get("peer_review_status", "peer_reviewed")
+        cid = rec.get("candidate_id") or paper_candidate_id(rec)
+        index[cid] = status
+        doi = norm_doi(rec.get("doi", ""))
+        if doi:
+            index[doi] = status
+            index["DOI:" + doi] = status
+    return index
+
+
+def validate_baseline(baseline, candidates, state):
+    if not isinstance(baseline, dict):
+        raise ValueError("decisions.baseline must be an object")
+    missing_sections = BASELINE_SECTIONS - set(baseline)
+    unknown_sections = set(baseline) - BASELINE_SECTIONS
+    if missing_sections or unknown_sections:
+        raise ValueError(
+            "baseline sections must be exactly "
+            + ", ".join(sorted(BASELINE_SECTIONS))
+        )
+
+    source_index = source_status_index(candidates, state)
+    for section, claims in baseline.items():
+        if not isinstance(claims, list):
+            raise ValueError(f"baseline.{section} must be an array")
+        for position, claim in enumerate(claims):
+            label = f"baseline.{section}[{position}]"
+            if not isinstance(claim, dict):
+                raise ValueError(f"{label} must be an object")
+            if not isinstance(claim.get("claim"), str) or not claim["claim"].strip():
+                raise ValueError(f"{label}.claim must be non-empty")
+            strength = claim.get("strength")
+            if type(strength) is not int or not 1 <= strength <= 5:
+                raise ValueError(f"{label}.strength must be 1-5")
+            parse_iso_date(claim.get("updated"), f"{label}.updated")
+            sources = claim.get("sources")
+            if not isinstance(sources, list) or not sources:
+                raise ValueError(f"{label}.sources must be a non-empty array")
+            for source in sources:
+                if not isinstance(source, str) or not source.strip():
+                    raise ValueError(f"{label}.sources entries must be non-empty strings")
+                source = source.strip()
+                if source.startswith("PPR:"):
+                    raise ValueError(f"{label} contains preprint source {source}")
+                status = source_index.get(source)
+                if status is None:
+                    doi = norm_doi(source)
+                    status = source_index.get(doi) or source_index.get("DOI:" + doi)
+                if status in ("preprint", "book_chapter"):
+                    raise ValueError(f"{label} contains ineligible {status} source {source}")
+                if status is None and not (
+                    section == "guidelines" and source.startswith("https://")
+                ):
+                    raise ValueError(
+                        f"{label} source {source} is unknown; use a canonical PMID or guideline URL"
+                    )
+
+
+def validate_brief(decisions, candidates):
+    value = decisions.get("brief_path")
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("decisions.brief_path is required")
+    path = value if os.path.isabs(value) else os.path.join(ROOT, value)
+    path = require_path_within_out(os.path.abspath(path), "brief_path", ".md")
+    expected_name = f"brief-{candidates['period']}-{candidates['run_id']}.md"
+    if os.path.basename(path) != expected_name:
+        raise ValueError(f"brief_path filename must be {expected_name}")
+    try:
+        with open(path, "rb") as f:
+            content = f.read(MAX_REPORT_BYTES + 1)
+    except OSError as ex:
+        raise ValueError(f"brief_path cannot be read: {path}: {ex}") from ex
+    if not content:
+        raise ValueError("brief_path is empty")
+    if len(content) > MAX_REPORT_BYTES:
+        raise ValueError(f"brief exceeds the {MAX_REPORT_BYTES}-byte archive limit")
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as ex:
+        raise ValueError("brief must be UTF-8 Markdown") from ex
+
+    run_marker = f"<!-- med-skill-run-id: {candidates['run_id']} -->"
+    period_marker = f"<!-- med-skill-period: {candidates['period']} -->"
+    for marker in (run_marker, period_marker):
+        if marker not in text:
+            raise ValueError(f"brief is missing required marker: {marker}")
+    for phrase in ("不构成医疗建议", "不替代临床诊疗"):
+        if phrase not in text:
+            raise ValueError(f"brief is missing required safety statement: {phrase}")
+    return path, content, sha256_bytes(content)
+
+
+def publish_report(report_content, candidates, report_repo):
+    expected_repo = candidates.get("report_repository", "")
+    if report_repo.lower() != expected_repo.lower():
+        raise ValueError(
+            f"--report-repo {report_repo} does not match candidate artifact {expected_repo}"
+        )
+
+    metadata = run_gh_json(
+        [
+            "repo",
+            "view",
+            report_repo,
+            "--json",
+            "nameWithOwner,visibility,defaultBranchRef,url",
+        ]
+    )
+    if metadata.get("visibility") != "PRIVATE":
+        raise RuntimeError(
+            f"report repository {report_repo} must be private before health-related reports are archived"
+        )
+
+    canonical_repo = metadata.get("nameWithOwner") or report_repo
+    default_branch = (metadata.get("defaultBranchRef") or {}).get("name")
+    if not default_branch:
+        raise RuntimeError(f"report repository {canonical_repo} has no default branch")
+
+    period = candidates["period"]
+    run_id = candidates["run_id"]
+    remote_path = report_archive_path(period, run_id)
+    endpoint = f"repos/{canonical_repo}/contents/{remote_path}"
+    existing = run_gh_json(["api", endpoint], allow_not_found=True)
+    if existing is not None:
+        encoded = existing.get("content")
+        if existing.get("encoding") != "base64" or not isinstance(encoded, str):
+            raise RuntimeError(f"cannot verify existing archived report {remote_path}")
+        try:
+            existing_content = base64.b64decode(encoded)
+        except (ValueError, binascii.Error) as ex:
+            raise RuntimeError(f"existing archived report has invalid base64: {remote_path}") from ex
+        if existing_content != report_content:
+            raise RuntimeError(f"archive collision: {remote_path} already exists with different content")
+        commits_endpoint = (
+            f"repos/{canonical_repo}/commits?"
+            + urllib.parse.urlencode({"path": remote_path, "per_page": 1})
+        )
+        commits = run_gh_json(["api", commits_endpoint])
+        if not isinstance(commits, list):
+            raise RuntimeError(f"cannot resolve the commit for existing report {remote_path}")
+        return {
+            "repository": canonical_repo,
+            "repository_url": metadata.get("url", ""),
+            "path": remote_path,
+            "url": existing.get("html_url", ""),
+            "file_sha": existing.get("sha", ""),
+            "commit_sha": commits[0].get("sha", "") if commits else "",
+        }
+
+    result = run_gh_json(
+        ["api", "--method", "PUT", endpoint, "--input", "-"],
+        input_obj={
+            "message": f"Archive med-skill report {period} ({run_id})",
+            "content": base64.b64encode(report_content).decode("ascii"),
+            "branch": default_branch,
+        },
+    )
+    archived = result.get("content") or {}
+    commit = result.get("commit") or {}
+    if archived.get("path") != remote_path:
+        raise RuntimeError("GitHub did not confirm the expected report archive path")
+    return {
+        "repository": canonical_repo,
+        "repository_url": metadata.get("url", ""),
+        "path": remote_path,
+        "url": archived.get("html_url", ""),
+        "file_sha": archived.get("sha", ""),
+        "commit_sha": commit.get("sha", ""),
+    }
+
+
+def prepare_state(state, candidates):
+    if state is None:
+        return {
+            "schema_version": STATE_SCHEMA_VERSION,
+            "queries_version": candidates.get("queries_version"),
+            "seen": {},
+            "baseline": {section: [] for section in sorted(BASELINE_SECTIONS)},
+            "runs": [],
+        }
+    if not isinstance(state, dict):
+        raise ValueError("state must be a JSON object")
+    if state.get("schema_version") not in (2, STATE_SCHEMA_VERSION):
+        raise ValueError(
+            f"unsupported state schema_version {state.get('schema_version')!r}"
+        )
+    if not isinstance(state.get("seen"), dict) or not isinstance(state.get("runs"), list):
+        raise ValueError("state.seen must be an object and state.runs must be an array")
+    state.setdefault(
+        "baseline",
+        {section: [] for section in sorted(BASELINE_SECTIONS)},
+    )
+    return state
+
+
+def existing_run_entry(state, run_id):
+    matches = [
+        run for run in state.get("runs", [])
+        if isinstance(run, dict) and run.get("run_id") == run_id
+    ]
+    if len(matches) > 1:
+        raise ValueError(f"state contains duplicate run_id {run_id}")
+    return matches[0] if matches else None
+
+
+def validate_commit_order(state, candidates):
+    current_end = state.get("window_end_edat")
+    candidate_end = parse_iso_date(candidates["window"][1], "candidates.window[1]")
+    if current_end:
+        prior_end = parse_iso_date(current_end, "state.window_end_edat")
+        if candidate_end < prior_end:
+            raise ValueError(
+                f"stale candidate window ends {candidate_end}, before committed cursor {prior_end}"
+            )
+    current_query_version = state.get("queries_version")
+    if (
+        type(current_query_version) is int
+        and candidates["queries_version"] < current_query_version
+    ):
+        raise ValueError(
+            "candidate queries_version is older than the committed state queries_version"
+        )
 
 
 def commit_phase(args):
     if not args.candidates or not args.decisions:
-        sys.exit("--commit-state requires --candidates and --decisions")
+        raise ValueError("--commit-state requires --candidates and --decisions")
 
-    with open(args.candidates, encoding="utf-8") as f:
-        candidates = json.load(f)
-    with open(args.decisions, encoding="utf-8") as f:
-        decisions = json.load(f)
+    candidates, candidates_path, candidates_sha = read_json_artifact(
+        args.candidates, "candidates"
+    )
+    decisions, decisions_path, decisions_sha = read_json_artifact(
+        args.decisions, "decisions"
+    )
+    candidates_path = require_path_within_out(candidates_path, "candidates", ".json")
+    decisions_path = require_path_within_out(decisions_path, "decisions", ".json")
 
+    validate_candidate_artifact(candidates)
+    expected_candidate_name = (
+        f"candidates-{candidates['period']}-{candidates['run_id']}.json"
+    )
+    expected_decisions_name = (
+        f"decisions-{candidates['period']}-{candidates['run_id']}.json"
+    )
+    if os.path.basename(candidates_path) != expected_candidate_name:
+        raise ValueError(f"candidates filename must be {expected_candidate_name}")
+    if os.path.basename(decisions_path) != expected_decisions_name:
+        raise ValueError(f"decisions filename must be {expected_decisions_name}")
     if candidates.get("run_id") != decisions.get("run_id"):
-        sys.exit("run_id mismatch: refusing state commit")
+        raise ValueError("run_id mismatch: refusing state commit")
     if decisions.get("brief_generated") is not True:
-        sys.exit("decisions.brief_generated must be true")
+        raise ValueError("decisions.brief_generated must be true")
+    validate_decisions(candidates, decisions)
+    brief_path, brief_content, brief_sha = validate_brief(decisions, candidates)
 
-    try:
-        validate_decisions(candidates, decisions)
+    with state_lock():
+        state = prepare_state(load_state(), candidates)
         baseline = decisions.get("baseline")
-        if baseline is not None:
-            validate_no_preprint_baseline(baseline)
-    except ValueError as ex:
-        sys.exit("decision validation failed: " + str(ex))
+        effective_baseline = baseline if baseline is not None else state.get("baseline")
+        validate_baseline(effective_baseline, candidates, state)
 
-    state = load_state() or {
-        "schema_version": 2,
-        "queries_version": candidates.get("queries_version"),
-        "seen": {},
-        "baseline": {},
-        "runs": [],
-    }
-    state["schema_version"] = 2
-    seen = state.setdefault("seen", {})
-    item_decisions = decisions["items"]
-    today = date.today()
-
-    for rec in iter_candidate_papers(candidates):
-        cid = rec.get("candidate_id") or paper_candidate_id(rec)
-        decision = item_decisions[cid]
-
-        if rec.get("peer_review_status") == "preprint":
-            key = "PPR:" + rec.get("epmc_id", "")
+        existing_run = existing_run_entry(state, candidates["run_id"])
+        if existing_run is None:
+            validate_commit_order(state, candidates)
         else:
-            key = "PMID:" + rec.get("pmid", "") if rec.get("pmid") else cid
+            if existing_run.get("window") and existing_run["window"] != candidates["window"]:
+                raise ValueError(
+                    f"run_id {candidates['run_id']} was already committed with a different window"
+                )
+            for field, expected in (
+                ("candidates_sha256", candidates_sha),
+                ("decisions_sha256", decisions_sha),
+                ("brief_sha256", brief_sha),
+            ):
+                prior = existing_run.get(field)
+                if prior and prior != expected:
+                    raise ValueError(
+                        f"run_id {candidates['run_id']} was already committed with a different {field}"
+                    )
 
-        entry = seen.setdefault(key, {"first_seen": str(today), "track": []})
-        entry["track"] = sorted(set(entry.get("track", []) + rec.get("track", [])))
-        entry["doi"] = norm_doi(rec.get("doi", ""))
-        entry["title_norm"] = norm_title(rec.get("title", ""))
-        entry["peer_review_status"] = rec.get("peer_review_status", "peer_reviewed")
-        entry["retrieval_depth"] = decision.get("evidence_basis", rec.get("retrieval_depth", "abstract"))
-        entry["verdict"] = decision.get("verdict")
-        entry["scores"] = decision.get("scores")
-        entry["paradigm_status"] = decision.get("paradigm_status")
+        report_archive = publish_report(brief_content, candidates, args.report_repo)
+        relative_brief = os.path.relpath(brief_path, ROOT).replace(os.sep, "/")
 
-        if rec.get("peer_review_status") == "preprint":
-            entry["is_preprint"] = True
+        if existing_run is not None:
+            existing_run.update({
+                "brief_path": relative_brief,
+                "candidates_path": os.path.relpath(candidates_path, ROOT).replace(os.sep, "/"),
+                "decisions_path": os.path.relpath(decisions_path, ROOT).replace(os.sep, "/"),
+                "candidates_sha256": candidates_sha,
+                "decisions_sha256": decisions_sha,
+                "brief_sha256": brief_sha,
+                "report_archive": report_archive,
+            })
+            state["schema_version"] = STATE_SCHEMA_VERSION
+            write_json_atomic(STATE_PATH, state)
+            print(
+                f"-> run {candidates['run_id']} already committed; report archive verified",
+                file=sys.stderr,
+            )
+            return
 
-        prior_key = rec.get("prior_key")
-        if rec.get("publication_transition") and prior_key in seen:
-            seen[prior_key]["superseded_by"] = key
-            entry["supersedes"] = prior_key
+        seen = state.setdefault("seen", {})
+        item_decisions = decisions["items"]
+        today = date.today()
 
-    for trial in candidates.get("trials_new", []) + candidates.get("trials_changed", []):
-        key = trial_key(trial)
-        entry = seen.setdefault(key, {"first_seen": str(today), "track": ["F"]})
-        entry.update({
-            "registry": trial.get("registry"),
-            "last_status": trial.get("status"),
-            "has_results": trial.get("has_results"),
-            "protocol_hash": trial.get("protocol_hash"),
-            "title_norm": norm_title(trial.get("title", "")),
-            "last_update_posted": trial.get("last_update_posted", ""),
+        for rec in iter_candidate_papers(candidates):
+            cid = rec.get("candidate_id") or paper_candidate_id(rec)
+            decision = item_decisions[cid]
+
+            if rec.get("peer_review_status") == "preprint":
+                key = "PPR:" + rec.get("epmc_id", "")
+            else:
+                key = "PMID:" + rec.get("pmid", "") if rec.get("pmid") else cid
+
+            entry = seen.setdefault(key, {"first_seen": str(today), "track": []})
+            entry["track"] = sorted(set(entry.get("track", []) + rec.get("track", [])))
+            entry["doi"] = norm_doi(rec.get("doi", ""))
+            entry["title_norm"] = norm_title(rec.get("title", ""))
+            entry["peer_review_status"] = rec.get("peer_review_status", "peer_reviewed")
+            entry["retrieval_depth"] = decision.get(
+                "evidence_basis", rec.get("retrieval_depth", "abstract")
+            )
+            entry["verdict"] = decision.get("verdict")
+            entry["scores"] = decision.get("scores")
+            entry["paradigm_status"] = decision.get("paradigm_status")
+
+            if rec.get("peer_review_status") == "preprint":
+                entry["is_preprint"] = True
+
+            prior_key = rec.get("prior_key")
+            if rec.get("publication_transition") and prior_key in seen:
+                seen[prior_key]["superseded_by"] = key
+                entry["supersedes"] = prior_key
+
+        for trial in candidates.get("trials_new", []) + candidates.get("trials_changed", []):
+            key = trial_key(trial)
+            entry = seen.setdefault(key, {"first_seen": str(today), "track": ["F"]})
+            entry.update({
+                "registry": trial.get("registry"),
+                "last_status": trial.get("status"),
+                "has_results": trial.get("has_results"),
+                "protocol_hash": trial.get("protocol_hash"),
+                "title_norm": norm_title(trial.get("title", "")),
+                "last_update_posted": trial.get("last_update_posted", ""),
+            })
+
+        if baseline is not None:
+            state["baseline"] = baseline
+
+        material_count = sum(
+            1 for decision in item_decisions.values()
+            if decision.get("verdict") == "material"
+        )
+        state["schema_version"] = STATE_SCHEMA_VERSION
+        state["queries_version"] = candidates.get("queries_version")
+        state["last_run"] = str(today)
+        state["window_end_edat"] = candidates["window"][1]
+        state.setdefault("runs", []).append({
+            "run_id": candidates.get("run_id"),
+            "date": str(today),
+            "window": candidates.get("window"),
+            "hits": candidates.get("counts", {}).get("pubmed_unique_hits", 0),
+            "material": material_count,
+            "brief_generated": True,
+            "brief_path": relative_brief,
+            "candidates_path": os.path.relpath(candidates_path, ROOT).replace(os.sep, "/"),
+            "decisions_path": os.path.relpath(decisions_path, ROOT).replace(os.sep, "/"),
+            "candidates_sha256": candidates_sha,
+            "decisions_sha256": decisions_sha,
+            "brief_sha256": brief_sha,
+            "report_archive": report_archive,
         })
-
-    if baseline is not None:
-        state["baseline"] = baseline
-
-    material_count = sum(1 for decision in item_decisions.values() if decision.get("verdict") == "material")
-    state["queries_version"] = candidates.get("queries_version")
-    state["last_run"] = str(today)
-    state["window_end_edat"] = candidates.get("window", ["", ""])[1]
-    state.setdefault("runs", []).append({
-        "run_id": candidates.get("run_id"),
-        "date": str(today),
-        "window": candidates.get("window"),
-        "hits": candidates.get("counts", {}).get("pubmed_unique_hits", 0),
-        "material": material_count,
-        "brief_generated": True,
-        "brief_path": decisions.get("brief_path", ""),
-    })
-    write_json_atomic(STATE_PATH, state)
-    print("-> state/seen.json committed from exact candidate + decisions artifacts", file=sys.stderr)
+        write_json_atomic(STATE_PATH, state)
+        print(
+            "-> state/seen.json committed after private report archive: "
+            + report_archive["path"],
+            file=sys.stderr,
+        )
 
 
 def main():
@@ -1053,12 +1784,30 @@ def main():
     ap.add_argument("--commit-state", action="store_true")
     ap.add_argument("--candidates")
     ap.add_argument("--decisions")
+    ap.add_argument(
+        "--report-repo",
+        default=REPORT_REPO_DEFAULT,
+        help="private GitHub owner/repo used to archive generated reports",
+    )
     args = ap.parse_args()
 
+    if bool(args.start) != bool(args.end):
+        ap.error("--start and --end must be provided together")
     if args.commit_state:
-        commit_phase(args)
-    else:
-        fetch_phase(args)
+        if args.start or args.end or args.bootstrap:
+            ap.error("--commit-state cannot be combined with fetch window options")
+        if not args.candidates or not args.decisions:
+            ap.error("--commit-state requires --candidates and --decisions")
+    elif args.candidates or args.decisions:
+        ap.error("--candidates and --decisions are only valid with --commit-state")
+
+    try:
+        if args.commit_state:
+            commit_phase(args)
+        else:
+            fetch_phase(args)
+    except (ValueError, RuntimeError, OSError, json.JSONDecodeError) as ex:
+        sys.exit(str(ex))
 
 
 if __name__ == "__main__":

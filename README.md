@@ -108,6 +108,20 @@ cp templates/patient-profile.example.md patient-profile.md
 
 ## 运行流程
 
+运行依赖：Python 3.10+、GitHub CLI `gh`，无需第三方 Python 包。抓取需要访问
+PubMed/注册库；完整 commit 需要已登录且有权写入报告仓库的 `gh`。
+
+运行前必须完成：
+
+```bash
+export NCBI_EMAIL='you@example.com'
+gh auth status
+```
+
+完整运行会把简报归档到私有仓库 `Alanjiao1988/Med-report`。可通过
+`MED_REPORT_REPO` 或 `--report-repo owner/repo` 修改目标，但 candidate
+artifact 会固定本次运行的目标仓库，commit 时不能临时改投其他仓库。
+
 ### 1. 首次建立 24 个月 baseline 候选集
 
 ```bash
@@ -123,10 +137,11 @@ python scripts/fetch_evidence.py
 脚本输出：
 
 ```text
-out/candidates-YYYY-MM.json
+out/candidates-YYYY-MM-RUN_ID.json
 ```
 
-其中包含唯一 `run_id`。抓取阶段**不会修改 state**。
+其中包含唯一 `run_id` 和本次运行的 `report_repository`。每次抓取使用独立文件，
+同月重跑不会覆盖旧 artifact。抓取阶段**不会修改 state**。
 
 ### 3. 宿主 AI 进行证据解读并生成简报
 
@@ -135,17 +150,19 @@ out/candidates-YYYY-MM.json
 - `SKILL.md`
 - `references/scoring-rubric.md`
 - `templates/brief-template.md`
-- 当期 `out/candidates-YYYY-MM.json`
+- 当期 `out/candidates-YYYY-MM-RUN_ID.json`
 - 可选私有 `patient-profile.md`
 
 然后生成：
 
 ```text
-out/brief-YYYY-MM.md
-out/decisions-YYYY-MM.json
+out/brief-YYYY-MM-RUN_ID.md
+out/decisions-YYYY-MM-RUN_ID.json
 ```
 
-`decisions` 必须复用 candidates 中相同的 `run_id`，并设置：
+简报开头必须保留模板中的 `med-skill-run-id` 和 `med-skill-period` 标记。
+`decisions` 必须复用 candidates 中相同的 `run_id`，使用 `schema_version=3`，
+并设置：
 
 ```json
 "brief_generated": true
@@ -155,11 +172,20 @@ out/decisions-YYYY-MM.json
 
 ```bash
 python scripts/fetch_evidence.py --commit-state \
-  --candidates out/candidates-YYYY-MM.json \
-  --decisions out/decisions-YYYY-MM.json
+  --candidates out/candidates-YYYY-MM-RUN_ID.json \
+  --decisions out/decisions-YYYY-MM-RUN_ID.json
 ```
 
-commit 阶段**不会重新联网检索**。这保证写入 state 的就是刚才实际分析并形成简报的那一批候选，而不是一个时间上已发生漂移的新抓取结果。
+commit 阶段不会重新运行证据检索，但会通过 GitHub API 将已验证简报归档到：
+
+```text
+Alanjiao1988/Med-report
+└── reports/YYYY/YYYY-MM/brief-YYYY-MM-RUN_ID.md
+```
+
+目标仓库必须是 **private**；归档失败时 state 不会前移。归档成功后才写入
+`state/seen.json`。重复提交相同 `run_id` 是幂等的，旧窗口或旧 query version
+不能覆盖较新的 state。
 
 ## 数据源
 
@@ -205,15 +231,29 @@ out/
 
 均不应提交到 GitHub。`patient-profile.md` 包含健康隐私；`state/seen.json` 可能包含 patient relevance 评分痕迹。
 
+报告可能包含由患者画像推导出的个体相关性描述，因此报告归档仓库也必须保持
+private。脚本会在上传前验证仓库可见性，拒绝向 public/internal 仓库上传。
+
 ## 检索式与 schema 版本
 
 当前：
 
 ```text
-Skill: 0.4.0
+Skill: 0.5.0
 queries_version: 2
-state schema_version: 2
+state schema_version: 3
 ```
+
+## 0.5.0 变更
+
+- 每次抓取生成带 `run_id` 的不可覆盖 artifact；
+- commit 校验 candidate schema、评分范围、material 门槛、book/preprint 限制和 baseline 来源；
+- 简报必须真实存在、位于 `out/`、包含 run/period 标记与医疗免责；
+- state commit 增加文件锁、原子写入、幂等 run 和单调窗口保护；
+- state 写入前，将报告归档到私有 `Alanjiao1988/Med-report`；
+- state 保存 candidates/decisions/brief SHA-256 与远端归档位置，便于审计；
+- `--start` / `--end` 必须成对且不得形成未来窗口；
+- PubMed 抓取要求有效 `NCBI_EMAIL`，不再允许匿名运行。
 
 ## 0.4.0 变更
 
@@ -238,6 +278,16 @@ state schema_version: 2
 export NCBI_EMAIL='you@example.com'   # NCBI 要求提供联系方式
 export NCBI_TOOL='med-skill'
 export NCBI_API_KEY='...'             # 可选，提高 E-utilities 速率上限
+export MED_REPORT_REPO='Alanjiao1988/Med-report'
+```
+
+Windows PowerShell：
+
+```powershell
+$env:NCBI_EMAIL = 'you@example.com'
+$env:NCBI_TOOL = 'med-skill'
+$env:MED_REPORT_REPO = 'Alanjiao1988/Med-report'
+gh auth status
 ```
 
 ## 宿主投递
